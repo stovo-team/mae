@@ -296,27 +296,63 @@ fn walk_directory(current: &Path, root: &Path, out: &mut Vec<String>) -> Result<
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        // Skip ignored directories
+        // Skip ignored build and test directories
         if path.is_dir() {
-            if file_name == "node_modules"
-                || file_name == ".git"
-                || file_name == "target"
-                || file_name == "dist"
-                || file_name == "build"
-                || file_name == ".next"
-                || file_name == ".turbo"
-                || file_name == ".okf-index"
-            {
+            if is_excluded_source_dir(file_name) {
                 continue;
             }
             walk_directory(&path, root, out)?;
-        } else if let Ok(rel) = path.strip_prefix(root) {
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            out.push(rel_str);
+        } else if !is_excluded_test_artifact(file_name) {
+            if let Ok(rel) = path.strip_prefix(root) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                out.push(rel_str);
+            }
         }
     }
 
     Ok(())
+}
+
+/// Returns `true` if a directory name represents build output, tooling cache, or test-only fixtures/utilities.
+pub fn is_excluded_source_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules"
+            | ".git"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".turbo"
+            | ".okf-index"
+            | "coverage"
+            | "__tests__"
+            | "__mocks__"
+            | "test"
+            | "tests"
+            | "testUtils"
+            | "test-utils"
+            | "test-fixtures"
+            | "e2e"
+            | "playwright-report"
+            | "test-results"
+    )
+}
+
+/// Returns `true` if a file name is a test, spec, storybook, or test-runner configuration artifact.
+pub fn is_excluded_test_artifact(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.contains(".stories.")
+        || lower.ends_with("_test.ts")
+        || lower.ends_with("_test.tsx")
+        || lower.ends_with("_spec.ts")
+        || lower.ends_with("_spec.tsx")
+        || lower == "setup-tests.ts"
+        || lower == "setuptests.ts"
+        || lower == "vitest.config.ts"
+        || lower.starts_with("playwright.")
 }
 
 fn is_likely_entry_file(path: &str) -> bool {

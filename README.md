@@ -23,7 +23,8 @@ MAE is a contract-driven, evidence-verified software migration engine built with
 ├── .okf/                                      # Curated OKF Repository Brain knowledge bundle
 ├── .agents/skills/                            # Matt Pocock + Ponytail + Migration skills
 ├── docs/
-│   ├── adr/                                   # Architecture Decision Records (0001, 0002)
+│   ├── adr/                                   # Architecture Decision Records (0001, 0002, 0003)
+│   ├── guides/                                # Smaller-Model React -> Rust + Slint Execution Playbook
 │   └── specs/v0.1-multiphase-tdd-plan.md      # Multiphase TDD specification & seam plan
 ├── universal-migration-engine-docs/           # Comprehensive architecture & audit documentation suite
 ├── crates/

@@ -1019,3 +1019,58 @@ fn test_extract_css_responsive_wrap_and_max_width() {
     assert_eq!(layout.max_width_px, Some(1280.0));
     assert!(!layout.responsive_rules.is_empty());
 }
+
+#[test]
+fn test_excludes_test_artifacts_from_discovery_semantics_and_gaps() {
+    let td = TestDir::new("exclude_test_artifacts");
+    td.write_file(
+        "src/ChatView.tsx",
+        r#"import React, { useState } from 'react';
+           export function ChatView() {
+               const [message, setMessage] = useState("");
+               return <button aria-label="Send Message" onClick={() => setMessage("sent")}>Send</button>;
+           }"#,
+    );
+    td.write_file(
+        "src/ChatView.test.tsx",
+        r#"import React from 'react';
+           export function FakeTestComponent() {
+               window.localStorage.setItem("test", "1");
+               return <button>Fake Test Button</button>;
+           }"#,
+    );
+    td.write_file(
+        "src/styles.quick-access.test.ts",
+        r#"window.localStorage.getItem("leak");"#,
+    );
+    td.write_file(
+        "src/testUtils/helper.tsx",
+        r#"export function TestHelperWidget() { return <canvas id="testCanvas" />; }"#,
+    );
+    td.write_file(
+        "src/__tests__/suite.spec.tsx",
+        r#"export function SpecOnlyComponent() { return <div>Spec</div>; }"#,
+    );
+
+    let adapter = ReactSourceAdapter::default_windows();
+    let inv = adapter
+        .discover_project(td.as_str())
+        .expect("Discovery must succeed");
+    assert_eq!(inv.tsx_files, vec!["src/ChatView.tsx".to_string()]);
+    assert!(inv.ts_files.is_empty());
+
+    let model = adapter
+        .extract_semantics(td.as_str())
+        .expect("Semantic extraction must succeed");
+    assert_eq!(model.components.len(), 1);
+    assert_eq!(model.components[0].name, "ChatView");
+
+    let gaps = adapter
+        .classify_source_gaps(td.as_str(), &model)
+        .expect("Gap classification must succeed");
+    assert!(
+        gaps.gaps.is_empty(),
+        "Test files must not pollute production capability gap reports: {:?}",
+        gaps.gaps
+    );
+}

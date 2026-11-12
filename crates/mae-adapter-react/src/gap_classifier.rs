@@ -72,19 +72,11 @@ fn scan_dir_gaps(
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
 
         if p.is_dir() {
-            if name == "node_modules"
-                || name == ".git"
-                || name == "target"
-                || name == "dist"
-                || name == "build"
-                || name == ".next"
-                || name == ".turbo"
-                || name == ".okf-index"
-            {
+            if crate::discovery::is_excluded_source_dir(name) {
                 continue;
             }
             scan_dir_gaps(&p, root, gaps)?;
-        } else {
+        } else if !crate::discovery::is_excluded_test_artifact(name) {
             let lower = name.to_lowercase();
             if lower.ends_with(".tsx")
                 || lower.ends_with(".jsx")
