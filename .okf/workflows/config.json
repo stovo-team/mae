@@ -1,0 +1,30 @@
+{
+  "default_rigor": "standard",
+  "defaults": {
+    "bugfix": [
+      "tdd"
+    ],
+    "docs": [],
+    "feature": [
+      "sdd",
+      "tdd"
+    ],
+    "hotfix": [
+      "tdd"
+    ],
+    "maintenance": [],
+    "refactor": [],
+    "tests": []
+  },
+  "enabled_profiles": [
+    "sdd",
+    "tdd",
+    "gtdd"
+  ],
+  "gtdd": {
+    "execution": "recommend-only",
+    "fallback": "sequential-adversarial-review"
+  },
+  "schema_version": 1,
+  "selection": "adaptive"
+}

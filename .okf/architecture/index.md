@@ -1,6 +1,8 @@
 # Architecture
 
 <!-- okf:generated:start -->
+## Generated facts
+- Manifests: Cargo.toml, package.json
 <!-- okf:generated:end -->
 
 ## Curated constraints
