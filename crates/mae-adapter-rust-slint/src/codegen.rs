@@ -364,8 +364,7 @@ fn scaffold_modular_monolith(
             )?;
         } else {
             let body = match member {
-                "config" => r##"
-#[derive(Debug, Clone, PartialEq)]
+                "config" => r##"#[derive(Debug, Clone, PartialEq)]
 pub struct AppearanceSettings {
     pub brand: String,
     pub theme_mode: String,
@@ -376,7 +375,6 @@ pub struct AppearanceSettings {
     pub secondary_color: String,
     pub strings_locale: String,
 }
-
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self { brand: "MAE".into(), theme_mode: "system".into(), bubble_radius_px: 16.0,
@@ -384,7 +382,6 @@ impl Default for AppearanceSettings {
             secondary_color: "#64748b".into(), strings_locale: "en".into() }
     }
 }
-
 impl AppearanceSettings {
     /// Parses the supported TOML key/value overrides; unknown keys are ignored.
     pub fn from_toml(source: &str) -> Result<Self, String> {
@@ -409,7 +406,6 @@ impl AppearanceSettings {
         Ok(settings)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::AppearanceSettings;

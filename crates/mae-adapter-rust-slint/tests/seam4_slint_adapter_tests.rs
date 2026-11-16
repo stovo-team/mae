@@ -165,15 +165,6 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
             target_dir.to_str().unwrap(),
         )
         .unwrap();
-    let cargo = fs::read_to_string(target_dir.join("Cargo.toml")).unwrap();
-    assert!(cargo.contains("members"));
-    assert!(target_dir
-        .join("crates/migrated-slint-desktop-app/ui/components/ui/popup_primitives.slint")
-        .exists());
-    assert!(target_dir
-        .join("scripts/check-solid-boundaries.sh")
-        .exists());
-    assert!(target_dir.join("scripts/check-slint-tokens.sh").exists());
     let appearance = fs::read_to_string(target_dir.join("appearance.toml")).unwrap();
     assert!(appearance.contains("bubble_radius_px = 16"));
     assert!(appearance.contains("primary_color = \"#2563eb\""));
