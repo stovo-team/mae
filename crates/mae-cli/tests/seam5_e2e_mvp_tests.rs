@@ -17,8 +17,8 @@ use mae_cli::{
 };
 use mae_domain::{
     ArtifactRevision, Contract, DomainError, EvidenceRecord, GapReasonCode, MigrationStrategy,
-    TargetPlatform, TaskId, TaskState, VerificationCategory, VerificationStatus,
-    VerifierPluginPort,
+    SourceAdapterPort, TargetAdapterPort, TargetPlatform, TaskId, TaskState, VerificationCategory,
+    VerificationStatus, VerifierPluginPort,
 };
 use mae_verification::{BuildVerifier, NativeComplianceVerifier};
 
@@ -29,6 +29,34 @@ fn workspace_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+#[test]
+fn cli_help_and_static_visual_verify_are_actionable() {
+    let help = execute_cli_args(&["mae".into(), "--help".into()]).unwrap();
+    assert!(help.contains("verify <target>"));
+    let root = workspace_root();
+    let source = root.join("fixtures/react-rust-slint/source");
+    let model = ReactSourceAdapter::default_windows()
+        .extract_semantics(source.to_str().unwrap())
+        .unwrap();
+    let target = std::env::temp_dir().join(format!("mae-cli-static-visual-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&target);
+    RustSlintTargetAdapter::default()
+        .scaffold_target(&model, target.to_str().unwrap())
+        .unwrap();
+    let result = execute_cli_args(&[
+        "mae".into(),
+        "verify".into(),
+        target.to_string_lossy().into_owned(),
+        "--visual".into(),
+        "--source".into(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+    assert!(result.contains("static_visual_status=PASS"));
+    assert!(result.contains("no screenshot capture"));
+    let _ = fs::remove_dir_all(&target);
 }
 
 fn fixture_source_dir() -> PathBuf {

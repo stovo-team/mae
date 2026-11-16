@@ -17,10 +17,10 @@ use mae_application::{
     MigrationRunReport, OkfKnowledgeRepository, OpfPromptProvider,
 };
 use mae_domain::{
-    CapabilityReport, CliSourceAdapterPort, CliTargetAdapterPort, ContentHash, Contract,
-    ContractId, ContractSeverity, DomainError, MigrationAggregate, MigrationId, MigrationStrategy,
-    MigrationTask, SemanticUiModel, SourceAdapterPort, TargetPlatform, TaskId, TolerancePolicy,
-    VerificationCategory, VerifierPluginPort,
+    ArtifactRevision, CapabilityReport, CliSourceAdapterPort, CliTargetAdapterPort, ContentHash,
+    Contract, ContractId, ContractSeverity, DomainError, MigrationAggregate, MigrationId,
+    MigrationStrategy, MigrationTask, SemanticUiModel, SourceAdapterPort, TargetPlatform, TaskId,
+    TolerancePolicy, VerificationCategory, VerifierPluginPort,
 };
 
 use mae_verification::{
@@ -456,6 +456,7 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
     let (platform, pos) = extract_platform_flag(args)?;
     let subcommand = pos.get(1).map(String::as_str).unwrap_or("help");
     match subcommand {
+        "help" | "--help" | "-h" => Ok("MAE migration engine\n\nUSAGE:\n    mae [--platform <windows-desktop|ubuntu-desktop|cross-platform>] <COMMAND> [ARGS]\n\nCOMMANDS:\n    analyze <source>             Analyze React/TypeScript source\n    plan <source>                Build a migration plan\n    migrate <repo> <source> <target>  Run the migration pipeline\n    verify <target>              Check native target compliance\n    analyze-cli <python-file>    Analyze a Python CLI\n    migrate-cli <repo> <source> <target>  Migrate a Python CLI\n    run-e2e <repo> <source> <target>     Run the end-to-end pipeline\n".to_string()),
         "analyze" => {
             let source_dir = PathBuf::from(
                 pos.get(2)
@@ -492,12 +493,52 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
             let target_dir = PathBuf::from(pos.get(2).map(String::as_str).unwrap_or("target/mvp"));
             let native = NativeComplianceVerifier::for_platform(&target_dir, platform);
             let (status, violations) = native.inspect_target()?;
-            Ok(format!(
-                "MAE Verify Complete: platform={}, native_status={}, violations={}",
-                platform,
-                status,
-                violations.len()
-            ))
+            if !status.is_pass() {
+                return Err(DomainError::PortError(format!(
+                    "MAE Verify Failed: platform={}, native_status=FAIL, violations={}\n{}",
+                    platform, violations.len(), violations.join("\n")
+                )));
+            }
+            if pos.iter().any(|arg| arg == "--visual") {
+                let source_pos = pos.iter().position(|arg| arg == "--source").and_then(|idx| pos.get(idx + 1));
+                let source_dir = source_pos.map(PathBuf::from).ok_or_else(|| DomainError::PortError(
+                    "`mae verify --visual` requires `--source <react-source-dir>`".to_string(),
+                ))?;
+                let (model, _, _) = analyze_react_fixture_for_platform(&source_dir, platform)?;
+                let layout = model.layout_constraints.first();
+                let token = model.style_tokens.iter().find(|t| {
+                    let name = t.name.to_ascii_lowercase();
+                    name.contains("primary") || name.contains("accent")
+                });
+                let mut baseline = VisualSnapshot::new(
+                    "source-static-style",
+                    1280,
+                    800,
+                    layout.map(|l| l.spacing_px).unwrap_or(0.0),
+                    layout.map(|l| l.padding_px).unwrap_or(0.0),
+                    token.map(|t| t.value.as_str()).unwrap_or("#2563eb"),
+                    0.0,
+                ).with_roundness_and_scale(
+                    layout.map(|l| l.border_radius_px).unwrap_or(0.0),
+                    layout.map(|l| l.font_size_px).unwrap_or(0.0),
+                    layout.map(|l| l.scale_factor).unwrap_or(1.0),
+                );
+                baseline.scenario_id = "source-static-style".to_string();
+                let verifier = VisualParityVerifier::for_target_dir(baseline, &target_dir, 0.0);
+                let contract = Contract::new(
+                    ContractId::new("contract.visual.cli"),
+                    "Static source and generated theme parity",
+                    "Source and target declare matching geometry and theme tokens",
+                    VerificationCategory::Visual,
+                    ContractSeverity::High,
+                ).with_tolerance(TolerancePolicy::MaxPixelDeltaRatio(0.02));
+                let evidence = verifier.verify(&contract, ArtifactRevision::initial())?;
+                if !evidence.status.is_pass() {
+                    return Err(DomainError::PortError(format!("MAE Visual Verify Failed: {}", evidence.summary)));
+                }
+                return Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, static_visual_status=PASS (source and generated declarations; no screenshot capture)", platform));
+            }
+            Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, violations=0", platform))
         }
         "migrate" | "run-e2e" => {
             let repo_root = PathBuf::from(pos.get(2).map(String::as_str).unwrap_or("."));

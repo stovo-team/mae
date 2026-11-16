@@ -133,8 +133,9 @@ fn inspect_slint_target_visual_snapshot(
     let border_radius_px = extract_slint_px(&tokens_src, "border-radius:").unwrap_or(0.0);
     let font_size_px = extract_slint_px(&tokens_src, "font-size:").unwrap_or(0.0);
     let scale_factor = extract_slint_float(&tokens_src, "scale-factor:").unwrap_or(0.0);
-    let primary_color =
-        extract_slint_string(&tokens_src, "--color-primary:").unwrap_or_else(|| "#2563eb".into());
+    let primary_color = extract_slint_string(&tokens_src, "--color-primary:")
+        .or_else(|| extract_theme_color(&tokens_src))
+        .unwrap_or_else(|| "#2563eb".into());
 
     // Also verify `ui/app.slint` actually binds `ThemeTokens.border-radius` and `ThemeTokens.font-size`
     let effective_radius = if app_src.contains("ThemeTokens.border-radius") {
@@ -158,6 +159,22 @@ fn inspect_slint_target_visual_snapshot(
         pixel_delta_ratio,
     )
     .with_roundness_and_scale(effective_radius, effective_font_size, scale_factor))
+}
+
+fn extract_theme_color(src: &str) -> Option<String> {
+    src.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("primary") || lower.contains("accent")) || !line.contains(':') {
+            return None;
+        }
+        let value = line.split_once(':')?.1.trim().trim_end_matches(';').trim();
+        let value = value.trim_matches('"');
+        if value.starts_with('#') {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn extract_slint_px(src: &str, key: &str) -> Option<f64> {
