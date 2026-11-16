@@ -186,6 +186,20 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
             .unwrap();
     assert!(generated_main.contains("MAE_CONFIG"));
     assert!(generated_main.contains("AppearanceSettings::from_toml"));
+    let app_source =
+        fs::read_to_string(target_dir.join("crates/migrated-slint-application/src/lib.rs"))
+            .unwrap();
+    assert!(app_source.contains("pub enum AppEvent"));
+    assert!(app_source.contains("pub fn reduce"));
+    assert!(app_source.contains("pub fn seed_mock_workspace"));
+    let desktop_manifest =
+        fs::read_to_string(target_dir.join("crates/migrated-slint-desktop-app/Cargo.toml"))
+            .unwrap();
+    assert!(desktop_manifest.contains("slint-build"));
+    assert!(desktop_manifest.contains("headless-test"));
+    assert!(target_dir
+        .join("crates/migrated-slint-desktop-app/build.rs")
+        .exists());
     let clean_lint = std::process::Command::new("bash")
         .arg("scripts/check-slint-tokens.sh")
         .current_dir(&target_dir)
@@ -215,7 +229,7 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
     fs::remove_file(violation).unwrap();
 
     let output = std::process::Command::new("cargo")
-        .args(["test", "--workspace"])
+        .args(["test", "--workspace", "--no-default-features"])
         .current_dir(&target_dir)
         .output()
         .expect("run generated workspace tests");
@@ -223,6 +237,24 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let headless = std::process::Command::new("cargo")
+        .args([
+            "test",
+            "-p",
+            "migrated-slint-desktop-app",
+            "--no-default-features",
+            "--features",
+            "headless-test",
+        ])
+        .current_dir(&target_dir)
+        .output()
+        .expect("run generated desktop headless tests");
+    assert!(
+        headless.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&headless.stdout),
+        String::from_utf8_lossy(&headless.stderr)
     );
     let _ = fs::remove_dir_all(&target_dir);
 }
