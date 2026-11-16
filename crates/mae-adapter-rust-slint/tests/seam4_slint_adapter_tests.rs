@@ -133,7 +133,9 @@ fn scaffold_generates_exact_avatar_radius_and_bottom_pinned_chat_stream() {
     assert!(chat.contains("changed content-height => { self.content-y = min(0px, self.height - self.content-height); }"));
     let video = fs::read_to_string(target_dir.join("ui/components/videoattachment.slint")).unwrap();
     assert!(video.contains("interval: 33ms;"));
-    assert!(video.contains("callback frame-requested(int);"));
+    assert!(video.contains("in property <[image]> frames;"));
+    assert!(video.contains("root.frames[root.frame-index]"));
+    assert!(!video.contains("callback frame-requested(int);"));
     assert!(video.contains("callback launch-external-player();"));
     let media = fs::read_to_string(target_dir.join("src/app/media.rs")).unwrap();
     assert!(media.contains("pub fn extract_video_frames"));
@@ -172,9 +174,44 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
         .join("scripts/check-solid-boundaries.sh")
         .exists());
     assert!(target_dir.join("scripts/check-slint-tokens.sh").exists());
+    let appearance = fs::read_to_string(target_dir.join("appearance.toml")).unwrap();
+    assert!(appearance.contains("bubble_radius_px = 16"));
+    assert!(appearance.contains("primary_color = \"#2563eb\""));
+    let generated_main =
+        fs::read_to_string(target_dir.join("crates/migrated-slint-desktop-app/src/main.rs"))
+            .unwrap();
+    assert!(generated_main.contains("MAE_CONFIG"));
+    assert!(generated_main.contains("AppearanceSettings::from_toml"));
+    let clean_lint = std::process::Command::new("bash")
+        .arg("scripts/check-slint-tokens.sh")
+        .current_dir(&target_dir)
+        .output()
+        .expect("run generated Slint token linter");
+    assert!(
+        clean_lint.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean_lint.stderr)
+    );
+    let violation =
+        target_dir.join("crates/migrated-slint-desktop-app/ui/components/ui/pill.slint");
+    fs::write(
+        &violation,
+        "export component Pill inherits Rectangle { border-radius: 999px; }\n",
+    )
+    .unwrap();
+    let bad_lint = std::process::Command::new("bash")
+        .arg("scripts/check-slint-tokens.sh")
+        .current_dir(&target_dir)
+        .output()
+        .expect("run linter with forbidden pill radius");
+    assert!(
+        !bad_lint.status.success(),
+        "the token linter accepted a hard-coded pill radius"
+    );
+    fs::remove_file(violation).unwrap();
 
     let output = std::process::Command::new("cargo")
-        .args(["test", "--workspace", "--no-run"])
+        .args(["test", "--workspace"])
         .current_dir(&target_dir)
         .output()
         .expect("run generated workspace tests");

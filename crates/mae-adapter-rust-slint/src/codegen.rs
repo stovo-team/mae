@@ -302,6 +302,7 @@ fn scaffold_modular_monolith(
         .strip_suffix("-desktop-app")
         .unwrap_or(&configured_name)
         .to_string();
+    let app_module = app.replace('-', "_");
     let members = [
         "config",
         "shared-utils",
@@ -343,7 +344,7 @@ fn scaffold_modular_monolith(
                 "\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n"
             ));
         } else if is_binary {
-            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = []\nheadless-test = []\n"));
+            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = []\nheadless-test = []\n"));
         }
         write_file(root, &format!("{path}/Cargo.toml"), &cargo, &mut generated)?;
         if is_binary {
@@ -356,14 +357,72 @@ fn scaffold_modular_monolith(
                 root,
                 &format!("{path}/src/main.rs"),
                 &format!(
-                    "{attr}fn main() {{ println!(\"{}\"); }}\n",
+                    "{attr}fn main() {{ let path = std::env::var_os(\"MAE_CONFIG\").unwrap_or_else(|| \"appearance.toml\".into()); let settings = std::fs::read_to_string(path).ok().and_then(|source| {app_module}_config::AppearanceSettings::from_toml(&source).ok()).unwrap_or_default(); println!(\"{}: {{}}\", settings.brand); }}\n",
                     config.window_title
                 ),
                 &mut generated,
             )?;
         } else {
             let body = match member {
-                "config" => "#[derive(Debug, Clone, Default)]\npub struct AppearanceSettings { pub theme_mode: String, pub bubble_radius_px: f32 }\n",
+                "config" => r##"
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppearanceSettings {
+    pub brand: String,
+    pub theme_mode: String,
+    pub bubble_radius_px: f32,
+    pub spacing_px: f32,
+    pub motion_scale: f32,
+    pub primary_color: String,
+    pub secondary_color: String,
+    pub strings_locale: String,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self { brand: "MAE".into(), theme_mode: "system".into(), bubble_radius_px: 16.0,
+            spacing_px: 8.0, motion_scale: 1.0, primary_color: "#2563eb".into(),
+            secondary_color: "#64748b".into(), strings_locale: "en".into() }
+    }
+}
+
+impl AppearanceSettings {
+    /// Parses the supported TOML key/value overrides; unknown keys are ignored.
+    pub fn from_toml(source: &str) -> Result<Self, String> {
+        let mut settings = Self::default();
+        for (index, line) in source.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') { continue; }
+            let Some((key, value)) = line.split_once('=') else { return Err(format!("invalid setting on line {}", index + 1)); };
+            let key = key.trim();
+            let value = value.trim();
+            let string = || value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).map(str::to_owned)
+                .ok_or_else(|| format!("{key} must be a quoted string"));
+            let number = || value.parse::<f32>().map_err(|_| format!("{key} must be a number"));
+            match key {
+                "brand" => settings.brand = string()?, "theme_mode" => settings.theme_mode = string()?,
+                "bubble_radius_px" => settings.bubble_radius_px = number()?, "spacing_px" => settings.spacing_px = number()?,
+                "motion_scale" => settings.motion_scale = number()?, "primary_color" => settings.primary_color = string()?,
+                "secondary_color" => settings.secondary_color = string()?, "strings_locale" => settings.strings_locale = string()?,
+                _ => {}
+            }
+        }
+        Ok(settings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppearanceSettings;
+    #[test]
+    fn applies_toml_overrides_and_preserves_defaults() {
+        let settings = AppearanceSettings::from_toml("brand = \"Stovo\"\nbubble_radius_px = 20\nprimary_color = \"#123456\"\n").unwrap();
+        assert_eq!(settings.brand, "Stovo");
+        assert_eq!(settings.bubble_radius_px, 20.0);
+        assert_eq!(settings.primary_color, "#123456");
+        assert_eq!(settings.motion_scale, 1.0);
+    }
+}
+"##,
                 "shared-utils" => "pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(\" \") }\n",
                 "domain" => "pub trait LocalReplicaRepositoryPort { fn load(&self, key: &str) -> Option<String>; }\n",
                 "application" => "#[derive(Default)]\npub struct AppState { pub current_route: String }\n",
@@ -380,10 +439,26 @@ fn scaffold_modular_monolith(
         &generate_theme_tokens_slint(model),
         &mut generated,
     )?;
+    write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\nspacing_px = 8\nmotion_scale = 1\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nstrings_locale = \"en\"\n", &mut generated)?;
     write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "export component PopupButton inherits Rectangle {}\nexport component PopupField inherits Rectangle {}\n", &mut generated)?;
     write_file(root, &format!("{desktop}/ui/app.slint"), &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nexport component MainWindow inherits Window {{ title: \"{}\"; }}\n", config.window_title), &mut generated)?;
     write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
-    write_file(root, "scripts/check-slint-tokens.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n '#[0-9a-fA-F]{3,8}|border-radius: [0-9]+px|font-size: [0-9]+px' crates/*-desktop-app/ui/pages crates/*-desktop-app/ui/components --glob '*.slint'\n", &mut generated)?;
+    write_file(
+        root,
+        "scripts/check-slint-tokens.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+violations=0
+while IFS= read -r -d '' file; do
+    if grep -nE '#[0-9a-fA-F]{3,8}|border-radius:[[:space:]]*([0-9]+px|50%)|font-size:[[:space:]]*[0-9]+px' "$file"; then
+        violations=1
+    fi
+done < <(find "$root/crates" -type f -name '*.slint' \( -path '*-desktop-app/ui/pages/*' -o -path '*-desktop-app/ui/components/*' \) -print0)
+exit "$violations"
+"#,
+        &mut generated,
+    )?;
     let revision = RustSlintTargetAdapter::read_target_revision(root);
     RustSlintTargetAdapter::write_target_revision(root, revision)?;
     Ok(TargetScaffoldSummary {
@@ -1081,22 +1156,25 @@ fn generate_component_slint(comp: &ComponentNode) -> String {
             r#"import {{ ThemeTokens }} from "../theme/tokens.slint";
 
 export component {comp_name} inherits Rectangle {{
-    in-out property <image> current-frame;
-    in property <int> frame-count: 0;
+    in property <[image]> frames;
     in-out property <int> frame-index: 0;
-    callback frame-requested(int);
     callback launch-external-player();
     border-radius: ThemeTokens.border-radius;
 
     Timer {{
         interval: 33ms;
-        running: root.frame-count > 1;
+        running: root.frames.length > 1;
         triggered() => {{
-            root.frame-index = (root.frame-index + 1) % root.frame-count;
-            root.frame-requested(root.frame-index);
+            if root.frames.length > 0 {{
+                root.frame-index = (root.frame-index + 1) % root.frames.length;
+            }}
         }}
     }}
-    Image {{ source: root.current-frame; width: parent.width; height: parent.height; }}
+    Image {{
+        source: root.frames.length > 0 ? root.frames[root.frame-index] : @image-url("");
+        width: parent.width;
+        height: parent.height;
+    }}
     TouchArea {{ clicked() => {{ root.launch-external-player(); }} }}
 }}
 "#,
