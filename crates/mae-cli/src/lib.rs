@@ -4,6 +4,8 @@
 //! `mae-adapter-rust-slint`, and `mae-verification` into the complete
 //! React -> Native Desktop (Windows & Ubuntu/Linux) Rust + Slint frontend migration engine.
 
+mod visual_capture;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -489,14 +491,27 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
             ))
         }
         "verify" => {
-            let target_dir = PathBuf::from(pos.get(2).map(String::as_str).unwrap_or("target/mvp"));
+            let visual = pos.get(2).map(String::as_str) == Some("--visual");
+            let target_arg = if visual { pos.get(3) } else { pos.get(2) };
+            let target_dir = PathBuf::from(target_arg.map(String::as_str).unwrap_or("target/mvp"));
             let native = NativeComplianceVerifier::for_platform(&target_dir, platform);
             let (status, violations) = native.inspect_target()?;
+            let visual_summary = if visual {
+                let source_dir = PathBuf::from(
+                    pos.get(4)
+                        .map(String::as_str)
+                        .unwrap_or("fixtures/react-rust-slint/source"),
+                );
+                format!(", {}", visual_capture::verify_live_source(&source_dir, &target_dir)?)
+            } else {
+                String::new()
+            };
             Ok(format!(
-                "MAE Verify Complete: platform={}, native_status={}, violations={}",
+                "MAE Verify Complete: platform={}, native_status={}, violations={}{}",
                 platform,
                 status,
-                violations.len()
+                violations.len(),
+                visual_summary
             ))
         }
         "migrate" | "run-e2e" => {
@@ -611,7 +626,7 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
             run_cli_pilot_pipeline(&repo_root, py_file, target_out)
         }
         _ => Ok(
-            "MAE v0.1 CLI — Commands: analyze [--platform windows|ubuntu|cross-platform] <src> | plan [--platform ...] <src> | migrate [--platform ...] <root> <src> <out> | verify [--platform ...] <out> | run-e2e [--platform ...] <root> <src> <out> | analyze-cli <py_file> | migrate-cli <py_file> <target_out> | pilot-cli <root> <py_file> <target_out>"
+            "MAE v0.1 CLI — Commands: analyze [--platform windows|ubuntu|cross-platform] <src> | plan [--platform ...] <src> | migrate [--platform ...] <root> <src> <out> | verify [--visual] [--platform ...] <out> [source_dir] | run-e2e [--platform ...] <root> <src> <out> | analyze-cli <py_file> | migrate-cli <py_file> <target_out> | pilot-cli <root> <py_file> <target_out>"
                 .to_string(),
         ),
     }

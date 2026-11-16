@@ -55,3 +55,13 @@ opf check .
 okf-agent bundle index --root .okf --index-root .okf-index
 okf-agent bundle validate --root .okf --index-root .okf-index
 ```
+
+### Route-level visual verification
+
+```bash
+cargo run -p mae-cli -- verify --visual target/mvp fixtures/react-rust-slint/source
+```
+
+Visual mode starts the source project's `mock` script (or `dev` if `mock` is absent), waits for its local HTTP endpoint, and captures each route listed in `runtime-baseline.json` with headless Chromium. Put corresponding native captures at `target/mvp/.mae-visual/native/<route>.png`; MAE compares each image with ImageMagick and fails when more than 2% of pixels differ. Set `MAE_SOURCE_URL` or `MAE_CHROMIUM` to override the default server URL or Chromium executable.
+
+The current scaffold does not capture native windows itself. Until the generated Slint app provides that capture path, visual mode requires native route screenshots as input and reports their absence as a failure.
