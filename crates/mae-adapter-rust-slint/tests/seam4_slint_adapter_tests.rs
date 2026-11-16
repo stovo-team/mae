@@ -186,6 +186,9 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
             .unwrap();
     assert!(generated_main.contains("MAE_CONFIG"));
     assert!(generated_main.contains("AppearanceSettings::from_toml"));
+    assert!(generated_main.contains("MAE_VISUAL_ROUTE"));
+    assert!(generated_main.contains("MAE_VISUAL_OUTPUT"));
+    assert!(generated_main.contains("take_snapshot"));
     let app_source =
         fs::read_to_string(target_dir.join("crates/migrated-slint-application/src/lib.rs"))
             .unwrap();
@@ -256,6 +259,33 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
         String::from_utf8_lossy(&headless.stdout),
         String::from_utf8_lossy(&headless.stderr)
     );
+    let native_image = target_dir.join(".mae-visual/native/settings.ppm");
+    fs::create_dir_all(native_image.parent().unwrap()).unwrap();
+    let manifest = target_dir.join("crates/migrated-slint-desktop-app/Cargo.toml");
+    let capture = std::process::Command::new("cargo")
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--no-default-features",
+            "--features",
+            "headless-test",
+        ])
+        .current_dir(&target_dir)
+        .env("MAE_VISUAL_ROUTE", "/settings")
+        .env("MAE_VISUAL_OUTPUT", &native_image)
+        .output()
+        .expect("capture a generated native Slint route");
+    assert!(
+        capture.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&capture.stdout),
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    assert!(fs::read(&native_image)
+        .unwrap()
+        .starts_with(b"P6\n1280 800\n255\n"));
     let _ = fs::remove_dir_all(&target_dir);
 }
 

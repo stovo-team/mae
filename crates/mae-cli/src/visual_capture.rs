@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 use mae_domain::DomainError;
 
+mod native_target;
+use native_target::{capture_native_route, find_desktop_manifest};
+
 const DEFAULT_SOURCE_URL: &str = "http://127.0.0.1:5173";
 const MAX_PIXEL_DELTA_RATIO: f64 = 0.02;
 
@@ -27,6 +30,7 @@ pub fn verify_live_source(source_dir: &Path, target_dir: &Path) -> Result<String
             package_path.display()
         ))
     })?;
+    let desktop_manifest = find_desktop_manifest(target_dir)?;
 
     let source_url = std::env::var("MAE_SOURCE_URL").unwrap_or_else(|_| DEFAULT_SOURCE_URL.into());
     let endpoint = endpoint_from_url(&source_url)?;
@@ -62,12 +66,13 @@ pub fn verify_live_source(source_dir: &Path, target_dir: &Path) -> Result<String
     let source_shots = output_root.join("source");
     let native_shots = output_root.join("native");
     fs::create_dir_all(&source_shots).map_err(io_error)?;
+    fs::create_dir_all(&native_shots).map_err(io_error)?;
     let chromium = std::env::var("MAE_CHROMIUM").unwrap_or_else(|_| "chromium".into());
     let mut failures = Vec::new();
     for route in &routes {
         let name = route_file_name(route);
         let source_image = source_shots.join(format!("{name}.png"));
-        let native_image = native_shots.join(format!("{name}.png"));
+        let native_image = native_shots.join(format!("{name}.ppm"));
         let url = format!("{}{}", source_url.trim_end_matches('/'), route);
         let capture = Command::new(&chromium)
             .args([
@@ -86,11 +91,10 @@ pub fn verify_live_source(source_dir: &Path, target_dir: &Path) -> Result<String
             failures.push(format!("{route}: Chromium reference capture failed"));
             continue;
         }
-        if !native_image.exists() {
-            failures.push(format!(
-                "{route}: missing native screenshot {}; launch/capture the target for this route first",
-                native_image.display()
-            ));
+        if let Err(error) =
+            capture_native_route(target_dir, &desktop_manifest, route, &native_image)
+        {
+            failures.push(format!("{route}: {error}"));
             continue;
         }
         match compare_images(&source_image, &native_image) {
@@ -301,8 +305,12 @@ impl Drop for Server {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_source_script, extract_observed_routes, image_delta_ratio};
+    use super::{
+        discover_source_script, extract_observed_routes, image_delta_ratio, route_file_name,
+    };
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn reads_observed_routes_from_runtime_baseline() {
@@ -332,12 +340,46 @@ mod tests {
     }
 
     #[test]
+    fn creates_stable_route_names_for_native_capture_files() {
+        assert_eq!(route_file_name("/"), "index");
+        assert_eq!(route_file_name("/tasks/review"), "tasks_review");
+    }
+
+    #[test]
     fn reports_missing_source_server_script_instead_of_skipping_visual_check() {
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/react-rust-slint/source");
         let target = std::env::temp_dir().join("mae-visual-no-server-target");
         let error = super::verify_live_source(&source, &target).unwrap_err();
         assert!(error.to_string().contains("mock` or `dev` script"));
+    }
+
+    #[test]
+    fn reports_missing_generated_desktop_target_before_starting_source_server() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mae-visual-target-required-{unique}"));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("runtime-baseline.json"),
+            r#"{"observed_routes":["/","/settings"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            source.join("package.json"),
+            r#"{"scripts":{"mock":"missing-test-server"}}"#,
+        )
+        .unwrap();
+
+        let error = super::verify_live_source(&source, &target).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("generated modular Slint desktop target"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

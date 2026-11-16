@@ -62,6 +62,6 @@ okf-agent bundle validate --root .okf --index-root .okf-index
 cargo run -p mae-cli -- verify --visual target/mvp fixtures/react-rust-slint/source
 ```
 
-Visual mode starts the source project's `mock` script (or `dev` if `mock` is absent), waits for its local HTTP endpoint, and captures each route listed in `runtime-baseline.json` with headless Chromium. Put corresponding native captures at `target/mvp/.mae-visual/native/<route>.png`; MAE compares each image with ImageMagick and fails when more than 2% of pixels differ. Set `MAE_SOURCE_URL` or `MAE_CHROMIUM` to override the default server URL or Chromium executable.
+Visual mode starts the source project's `mock` script (or `dev` if `mock` is absent), waits for its local HTTP endpoint, and captures each route listed in `runtime-baseline.json` with headless Chromium. It then builds and launches the generated modular Slint desktop target with the `headless-test` feature, sets the matching route, and captures the native window through Slint's software renderer. The source PNGs and native PPMs are compared with ImageMagick; more than 2% differing pixels fails verification. The target must contain exactly one `crates/*-desktop-app` crate. Set `MAE_SOURCE_URL` or `MAE_CHROMIUM` to override the default server URL or Chromium executable.
 
-The current scaffold does not capture native windows itself. Until the generated Slint app provides that capture path, visual mode requires native route screenshots as input and reports their absence as a failure.
+The visual gate requires Cargo, npm and the source project's `mock` or `dev` script, headless Chromium, and ImageMagick (`identify` and `compare`). Captures are written under `target/mvp/.mae-visual/{source,native}/` for inspection.
