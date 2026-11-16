@@ -135,6 +135,20 @@ fn scaffold_generates_exact_avatar_radius_and_bottom_pinned_chat_stream() {
     assert!(video.contains("interval: 33ms;"));
     assert!(video.contains("callback frame-requested(int);"));
     assert!(video.contains("callback launch-external-player();"));
+    let media = fs::read_to_string(target_dir.join("src/app/media.rs")).unwrap();
+    assert!(media.contains("pub fn extract_video_frames"));
+    assert!(media.contains("fps=30"));
+    assert!(media.contains("pub fn open_external_player"));
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--no-run"])
+        .current_dir(&target_dir)
+        .output()
+        .expect("compile generated video target");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let _ = fs::remove_dir_all(&target_dir);
 }
 

@@ -123,12 +123,24 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         write_file(&root, "src/lib.rs", &lib_rs, &mut files_generated)?;
 
         // 5. src/app/{mod,api_client,state,events,reducer,effects,navigation}.rs
+        let has_video = model
+            .components
+            .iter()
+            .any(|component| component.name.to_ascii_lowercase().contains("video"));
         write_file(
             &root,
             "src/app/mod.rs",
-            &generate_app_mod_rs(),
+            &generate_app_mod_rs(has_video),
             &mut files_generated,
         )?;
+        if has_video {
+            write_file(
+                &root,
+                "src/app/media.rs",
+                &generate_media_rs(),
+                &mut files_generated,
+            )?;
+        }
         write_file(
             &root,
             "src/app/api_client.rs",
@@ -565,15 +577,62 @@ fn generate_lib_rs(has_windows_subsystem: bool) -> String {
     format!("{win_attr}pub mod app;\n")
 }
 
-fn generate_app_mod_rs() -> String {
-    r#"pub mod api_client;
-pub mod effects;
-pub mod events;
-pub mod navigation;
-pub mod reducer;
-pub mod state;
-"#
-    .to_string()
+fn generate_app_mod_rs(has_video: bool) -> String {
+    format!(
+        "pub mod api_client;\npub mod effects;\npub mod events;\npub mod navigation;\npub mod reducer;\npub mod state;\n{}",
+        if has_video { "pub mod media;\n" } else { "" }
+    )
+}
+
+fn generate_media_rs() -> String {
+    r#"use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::UNIX_EPOCH;
+
+/// Extracts 30 fps PNG frames through FFmpeg and reuses a cache keyed by source size and mtime.
+pub fn extract_video_frames(source: &Path, cache_root: &Path) -> io::Result<Vec<PathBuf>> {
+    let metadata = fs::metadata(source)?;
+    let modified = metadata.modified()?.duration_since(UNIX_EPOCH)
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?.as_secs();
+    let name = source.file_stem().and_then(|value| value.to_str()).unwrap_or("video");
+    let cache = cache_root.join(format!("{name}-{}-{modified}", metadata.len()));
+    fs::create_dir_all(&cache)?;
+    let mut frames = cached_frames(&cache)?;
+    if !frames.is_empty() { return Ok(frames); }
+    let pattern = cache.join("frame-%06d.png");
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(source).args(["-vf", "fps=30", "-vsync", "0", "-start_number", "0"])
+        .arg(pattern).status()?;
+    if !status.success() { return Err(io::Error::new(io::ErrorKind::Other, "ffmpeg frame extraction failed")); }
+    frames = cached_frames(&cache)?;
+    if frames.is_empty() { return Err(io::Error::new(io::ErrorKind::Other, "ffmpeg produced no video frames")); }
+    Ok(frames)
+}
+
+fn cached_frames(cache: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut frames = fs::read_dir(cache)?.flatten().map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
+        .collect::<Vec<_>>();
+    frames.sort();
+    Ok(frames)
+}
+
+/// Opens the original video in the platform's registered media player.
+pub fn open_external_player(source: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd").args(["/C", "start", ""]).arg(source).status()?;
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").arg(source).status()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open").arg(source).status()?;
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err(io::Error::new(io::ErrorKind::Unsupported, "no external media player launcher for this platform"));
+    if status.success() { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "external media player failed to launch")) }
+}
+"#.to_string()
 }
 
 fn generate_api_client_rs(model: &SemanticUiModel) -> String {
