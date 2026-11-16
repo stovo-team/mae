@@ -150,6 +150,42 @@ fn is_asset_file(name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn analyze_tsx_content(file_path: &str, content: &str, model: &mut SemanticUiModel) {
+    let normalized_path = file_path.replace('\\', "/").to_ascii_lowercase();
+    if normalized_path.starts_with("src/config/")
+        || normalized_path.starts_with("src/design-system/")
+    {
+        let mut object_prefix: Option<String> = None;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(prefix) = object_prefix.as_ref() {
+                if trimmed.starts_with('}') {
+                    object_prefix = None;
+                    continue;
+                }
+                if let Some((key, raw)) = trimmed.trim_end_matches(',').split_once(':') {
+                    let name = format!("{prefix}-{}", key.trim());
+                    if let Some(value) = parse_config_scalar(raw.trim()) {
+                        push_config_token(model, &name, value);
+                    }
+                }
+                continue;
+            }
+            let Some((name, raw_value)) = trimmed
+                .strip_prefix("export const ")
+                .or_else(|| trimmed.strip_prefix("const "))
+                .and_then(|rest| rest.split_once('='))
+            else {
+                continue;
+            };
+            let name = name.split(':').next().unwrap_or(name).trim();
+            let raw = raw_value.trim().trim_end_matches(';').trim();
+            if raw.starts_with('{') && !raw.contains('}') {
+                object_prefix = Some(name.to_string());
+            } else if let Some(value) = parse_config_scalar(raw).filter(|_| !name.is_empty()) {
+                push_config_token(model, name, value);
+            }
+        }
+    }
     // 1. Extract interfaces / type declarations for Props
     let props_map = extract_props_interfaces(content);
 
@@ -199,6 +235,44 @@ pub fn analyze_tsx_content(file_path: &str, content: &str, model: &mut SemanticU
         {
             model.add_api_endpoint(ep);
         }
+    }
+}
+
+fn parse_config_scalar(raw: &str) -> Option<&str> {
+    let raw = raw.trim().trim_end_matches(',').trim();
+    raw.strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .or_else(|| raw.strip_prefix('`').and_then(|v| v.strip_suffix('`')))
+        .or_else(|| raw.strip_prefix('#').map(|_| raw))
+        .or_else(|| {
+            raw.trim_end_matches("px")
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|_| raw)
+        })
+}
+
+fn push_config_token(model: &mut SemanticUiModel, name: &str, value: &str) {
+    let token_name = name
+        .chars()
+        .flat_map(|ch| {
+            if ch.is_ascii_uppercase() {
+                vec!['-', ch.to_ascii_lowercase()]
+            } else {
+                vec![ch.to_ascii_lowercase()]
+            }
+        })
+        .collect::<String>()
+        .trim_start_matches('-')
+        .to_string();
+    if !model
+        .style_tokens
+        .iter()
+        .any(|token| token.name == token_name)
+    {
+        model.style_tokens.push(StyleToken::new(token_name, value));
     }
 }
 
@@ -412,12 +486,18 @@ fn extract_jsx_ui_elements(content: &str) -> Vec<UiElementNode> {
 
         if block.starts_with("<button") {
             let role = extract_attribute_value(&block, "role");
+            let class_name = extract_attribute_value(&block, "className")
+                .or_else(|| extract_attribute_value(&block, "class"))
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let declared_variant = extract_attribute_value(&block, "data-variant")
+                .or_else(|| extract_attribute_value(&block, "variant"))
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             let is_tab = role.as_deref() == Some("tab")
-                || action_handler
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("setTimeRange")
-                || inner_text.contains("Days");
+                || class_name
+                    .split_whitespace()
+                    .any(|name| name.contains("tab"));
             let kind = if is_tab {
                 UiElementKind::TabButton
             } else {
@@ -443,15 +523,17 @@ fn extract_jsx_ui_elements(content: &str) -> Vec<UiElementNode> {
                 || action_handler
                     .as_deref()
                     .unwrap_or("")
+                    .to_ascii_lowercase()
                     .contains("complete_all")
             {
                 "complete-all"
             } else if is_tab {
                 "tab-selector"
-            } else if block.contains("primary")
-                || label.contains("Add Task")
-                || label.contains("Save Preferences")
-                || label.contains("Mark All Read")
+            } else if declared_variant == "primary"
+                || class_name
+                    .split_whitespace()
+                    .any(|name| name.contains("primary"))
+                || extract_attribute_value(&block, "type").as_deref() == Some("submit")
             {
                 "primary"
             } else {
@@ -1010,17 +1092,35 @@ fn extract_interaction_bindings(content: &str) -> Vec<InteractionBinding> {
 /// Extracts `<Route path="..." element={<View />} />` or `<Route path="..." component={View} />`.
 fn extract_routes(content: &str) -> Vec<RouteDefinition> {
     let mut routes = Vec::new();
-
+    let mut block = String::new();
+    let mut parent_paths: Vec<String> = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("<Route ") {
-            let path_opt = extract_attribute_value(trimmed, "path");
-            let component_opt = extract_jsx_element_or_component(trimmed);
-
-            if let (Some(path), Some(comp)) = (path_opt, component_opt) {
+        if trimmed.starts_with("</Route") {
+            parent_paths.pop();
+            continue;
+        }
+        if block.is_empty() && trimmed.starts_with("<Route") {
+            block.push_str(trimmed);
+        } else if !block.is_empty() {
+            block.push(' ');
+            block.push_str(trimmed);
+        }
+        if !block.is_empty() && find_tag_close_gt(&block).is_some() {
+            if let (Some(path), Some(comp)) = (
+                extract_attribute_value(&block, "path"),
+                extract_jsx_element_or_component(&block),
+            ) {
+                let path = if path.starts_with('/') || parent_paths.is_empty() {
+                    path
+                } else {
+                    format!(
+                        "{}/{}",
+                        parent_paths.last().unwrap().trim_end_matches('/'),
+                        path.trim_start_matches('/')
+                    )
+                };
                 let mut route = RouteDefinition::new(&path, &comp);
-
-                // Extract path parameters: e.g. /tasks/:id -> ["id"]
                 for segment in path.split('/') {
                     if let Some(param) = segment.strip_prefix(':') {
                         route = route.with_param(param);
@@ -1028,6 +1128,21 @@ fn extract_routes(content: &str) -> Vec<RouteDefinition> {
                 }
                 routes.push(route);
             }
+            if !block.trim_end().ends_with("/>") {
+                if let Some(path) = extract_attribute_value(&block, "path") {
+                    let path = if path.starts_with('/') || parent_paths.is_empty() {
+                        path
+                    } else {
+                        format!(
+                            "{}/{}",
+                            parent_paths.last().unwrap().trim_end_matches('/'),
+                            path.trim_start_matches('/')
+                        )
+                    };
+                    parent_paths.push(path);
+                }
+            }
+            block.clear();
         }
     }
 
@@ -1220,6 +1335,29 @@ fn extract_api_endpoints(file_path: &str, content: &str) -> Vec<ApiEndpointBindi
     let mut endpoints = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("websocket") || lower.contains("websocket(") {
+            if let Some(url) = first_quoted_value(trimmed) {
+                endpoints.push(ApiEndpointBinding::new("WEBSOCKET", url, file_path));
+            }
+            continue;
+        }
+        let lower_path = file_path.to_ascii_lowercase();
+        if lower_path.contains("/api/") || lower_path.starts_with("api/") {
+            for method in ["get", "post", "put", "patch", "delete"] {
+                let call = format!(".{method}(");
+                if let Some(pos) = lower.find(&call) {
+                    if let Some(url) = first_quoted_value(&trimmed[pos + call.len()..]) {
+                        endpoints.push(ApiEndpointBinding::new(
+                            method.to_ascii_uppercase(),
+                            url,
+                            file_path,
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
         if let Some(fetch_idx) = trimmed.find("fetch(") {
             let after_fetch = trimmed[fetch_idx + 6..].trim();
             let quote = after_fetch.chars().next().unwrap_or(' ');
@@ -1245,4 +1383,12 @@ fn extract_api_endpoints(file_path: &str, content: &str) -> Vec<ApiEndpointBindi
         }
     }
     endpoints
+}
+
+fn first_quoted_value(text: &str) -> Option<String> {
+    let (start, quote) = text
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '\'' | '"' | '`'))?;
+    let rest = &text[start + quote.len_utf8()..];
+    Some(rest.split(quote).next()?.to_string()).filter(|value| !value.is_empty())
 }

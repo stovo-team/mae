@@ -927,6 +927,103 @@ fn test_extract_api_endpoint_bindings() {
 }
 
 #[test]
+fn extracts_multiline_routes_typed_api_calls_websockets_and_typescript_tokens() {
+    let td = TestDir::new("production_patterns");
+    td.write_file(
+        "src/App.tsx",
+        r#"<Routes>
+      <Route
+        path="/app/chats/:chatId"
+        element={<ChatView />}
+      />
+      <Route path="/s/:slug/*" element={<ClusterView />}>
+        <Route path="chats" element={<ChatCluster />} />
+      </Route>
+    </Routes>"#,
+    );
+    td.write_file(
+        "src/api/messages.ts",
+        r#"export const load = () => apiClient.get('/messages');
+      export const send = () => request.post('/messages');"#,
+    );
+    td.write_file(
+        "src/realtime/socket.ts",
+        r#"const socket = new WebSocket('wss://example.test/live');"#,
+    );
+    td.write_file(
+        "src/config/radii.ts",
+        "export const bubbleRadius = 18;\nexport const accent = '#2aabee';\nexport const sizes = {\n  small: 8,\n  medium: 16,\n};\n",
+    );
+
+    let model = ReactSourceAdapter::default_windows()
+        .extract_semantics(td.as_str())
+        .unwrap();
+    assert!(model
+        .routes
+        .iter()
+        .any(|route| route.path == "/app/chats/:chatId" && route.view_component == "ChatView"));
+    assert!(model.routes.iter().any(|route| route.path == "/s/:slug/*"));
+    assert!(model
+        .routes
+        .iter()
+        .any(|route| route.path == "/s/:slug/*/chats" && route.view_component == "ChatCluster"));
+    assert!(model
+        .api_endpoints
+        .iter()
+        .any(|endpoint| endpoint.method == "GET" && endpoint.url_or_path == "/messages"));
+    assert!(model
+        .api_endpoints
+        .iter()
+        .any(|endpoint| endpoint.method == "POST" && endpoint.url_or_path == "/messages"));
+    assert!(model
+        .api_endpoints
+        .iter()
+        .any(|endpoint| endpoint.method == "WEBSOCKET"));
+    assert!(model
+        .style_tokens
+        .iter()
+        .any(|token| token.name == "bubble-radius" && token.value == "18"));
+    assert!(model
+        .style_tokens
+        .iter()
+        .any(|token| token.name == "accent" && token.value == "#2aabee"));
+    assert!(model
+        .style_tokens
+        .iter()
+        .any(|token| token.name == "sizes-small" && token.value == "8"));
+}
+
+#[test]
+fn classifies_browser_crypto_media_capacitor_and_storage_ports() {
+    let source = r#"
+      await window.crypto.subtle.encrypt(params, key, data);
+      const peer = new RTCPeerConnection();
+      navigator.mediaDevices.getUserMedia({ audio: true });
+      const audio = new AudioContext();
+      import { Room } from 'livekit-client';
+      import { registerPlugin } from '@capacitor/core';
+      const plugin = registerPlugin('CallPlugin');
+      const db = indexedDB.open('local');
+      navigator.clipboard.writeText(text);
+      new Notification('Ready');
+      URL.createObjectURL(file);
+    "#;
+    let gaps = mae_adapter_react::gap_classifier::scan_file_gaps("src/platform.ts", source);
+    assert!(gaps
+        .iter()
+        .any(|gap| gap.description.contains("MessageCryptoPort")));
+    assert!(gaps
+        .iter()
+        .any(|gap| gap.description.contains("CallMediaEnginePort")));
+    assert!(gaps
+        .iter()
+        .any(|gap| gap.description.contains("Capacitor plugin")));
+    assert!(gaps
+        .iter()
+        .any(|gap| gap.description.contains("LocalReplicaRepositoryPort")));
+}
+
+#[test]
 fn test_extract_jsx_ui_elements_with_options_and_variants() {
     let td = TestDir::new("ui_elements_options");
     td.write_file(
