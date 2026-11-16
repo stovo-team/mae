@@ -101,13 +101,17 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
             .map_err(|e| DomainError::PortError(format!("Failed to create tests: {e}")))?;
 
         let crate_name = sanitize_crate_name(&self.config.crate_name);
+        let has_video = model
+            .components
+            .iter()
+            .any(|component| component.name.to_ascii_lowercase().contains("video"));
         let has_windows_subsystem = model.platform.requires_windows_subsystem();
         let has_linux_desktop = model.platform.requires_linux_desktop_entry();
 
         let mut files_generated = Vec::new();
 
         // 1. Cargo.toml
-        let cargo_toml = generate_cargo_toml(&crate_name, model.platform);
+        let cargo_toml = generate_cargo_toml(&crate_name, model.platform, has_video);
         write_file(&root, "Cargo.toml", &cargo_toml, &mut files_generated)?;
 
         // 2. build.rs
@@ -123,10 +127,6 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         write_file(&root, "src/lib.rs", &lib_rs, &mut files_generated)?;
 
         // 5. src/app/{mod,api_client,state,events,reducer,effects,navigation}.rs
-        let has_video = model
-            .components
-            .iter()
-            .any(|component| component.name.to_ascii_lowercase().contains("video"));
         write_file(
             &root,
             "src/app/mod.rs",
@@ -519,12 +519,18 @@ fn sanitize_identifier(raw: &str) -> String {
     }
 }
 
-fn generate_cargo_toml(crate_name: &str, platform: TargetPlatform) -> String {
+fn generate_cargo_toml(crate_name: &str, platform: TargetPlatform, has_video: bool) -> String {
     let desktop_entry_line = if platform.requires_linux_desktop_entry() {
         format!("desktop_entry = \"packaging/{crate_name}.desktop\"\n")
     } else {
         String::new()
     };
+    let video_dependencies = if has_video {
+        "\n[dependencies]\nslint = { version = \"=1.18.1\", default-features = false, features = [\"std\", \"compat-1-18\"], optional = true }\nimage = { version = \"0.25\", default-features = false, features = [\"png\"], optional = true }\n\n[features]\ninline-video = [\"dep:slint\", \"dep:image\"]\n".to_string()
+    } else {
+        String::new()
+    };
+    let generated_metadata = format!("{desktop_entry_line}{video_dependencies}");
     format!(
         r#"[package]
 name = "{crate_name}"
@@ -544,7 +550,7 @@ embedded_browser = false
         crate_name = crate_name,
         platform = platform.as_str(),
         window_backend = platform.native_window_backend(),
-        desktop_entry_line = desktop_entry_line
+        desktop_entry_line = generated_metadata
     )
 }
 
@@ -689,6 +695,30 @@ fn cached_frames(cache: &Path) -> io::Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     frames.sort();
     Ok(frames)
+}
+
+/// Decodes cached PNG frames into the `[image]` values accepted by VideoAttachment.
+#[cfg(feature = "inline-video")]
+pub fn load_video_images(paths: &[PathBuf]) -> io::Result<Vec<slint::Image>> {
+    paths.iter().map(|path| {
+        let decoded = image::open(path).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?.into_rgba8();
+        let (width, height) = decoded.dimensions();
+        let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(decoded.as_raw(), width, height);
+        Ok(slint::Image::from_rgba8(pixels))
+    }).collect()
+}
+
+#[cfg(all(test, feature = "inline-video"))]
+mod tests {
+    use super::load_video_images;
+    #[test]
+    fn decodes_cached_png_into_a_slint_image() {
+        let path = std::env::temp_dir().join(format!("mae-frame-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([12, 34, 56, 255])).save(&path).unwrap();
+        let frames = load_video_images(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(frames.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 /// Opens the original video in the platform's registered media player.
