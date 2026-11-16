@@ -13,6 +13,14 @@ pub struct RustSlintAdapterConfig {
     pub window_title: String,
     pub window_width: u32,
     pub window_height: u32,
+    pub topology: WorkspaceTopology,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceTopology {
+    #[default]
+    SingleCrate,
+    ModularMonolith,
 }
 
 impl Default for RustSlintAdapterConfig {
@@ -22,6 +30,7 @@ impl Default for RustSlintAdapterConfig {
             window_title: "MAE Native Slint Application".to_string(),
             window_width: 1280,
             window_height: 800,
+            topology: WorkspaceTopology::SingleCrate,
         }
     }
 }
@@ -45,6 +54,11 @@ impl RustSlintTargetAdapter {
                 ..RustSlintAdapterConfig::default()
             },
         }
+    }
+
+    pub fn with_topology(mut self, topology: WorkspaceTopology) -> Self {
+        self.config.topology = topology;
+        self
     }
 
     /// Reads the current target `ArtifactRevision` persisted in `target_dir/.mae-target-revision`.
@@ -72,6 +86,9 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         target_dir: &str,
     ) -> Result<TargetScaffoldSummary, DomainError> {
         let root = PathBuf::from(target_dir);
+        if self.config.topology == WorkspaceTopology::ModularMonolith {
+            return scaffold_modular_monolith(&self.config, model, &root);
+        }
         fs::create_dir_all(root.join("src/app"))
             .map_err(|e| DomainError::PortError(format!("Failed to create src/app: {e}")))?;
         fs::create_dir_all(root.join("ui/components"))
@@ -261,6 +278,107 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         Self::write_target_revision(&root, next_rev)?;
         Ok(next_rev)
     }
+}
+
+fn scaffold_modular_monolith(
+    config: &RustSlintAdapterConfig,
+    model: &SemanticUiModel,
+    root: &Path,
+) -> Result<TargetScaffoldSummary, DomainError> {
+    let configured_name = sanitize_crate_name(&config.crate_name);
+    let app = configured_name
+        .strip_suffix("-desktop-app")
+        .unwrap_or(&configured_name)
+        .to_string();
+    let members = [
+        "config",
+        "shared-utils",
+        "domain",
+        "application",
+        "adapter-storage",
+        "adapter-network",
+        "adapter-crypto",
+        "adapter-media",
+        "adapter-platform",
+        "desktop-app",
+    ];
+    let mut generated = Vec::new();
+    fs::create_dir_all(root.join("crates")).map_err(|e| DomainError::PortError(e.to_string()))?;
+    write_file(
+        root,
+        "Cargo.toml",
+        &format!(
+            "[workspace]\nresolver = \"2\"\nmembers = [{}]\n",
+            members
+                .iter()
+                .map(|name| format!("\"crates/{app}-{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        &mut generated,
+    )?;
+    for member in members {
+        let crate_name = format!("{app}-{member}");
+        let is_binary = member == "desktop-app";
+        let path = format!("crates/{crate_name}");
+        let mut cargo = format!(
+            "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+        );
+        if member == "application" {
+            cargo.push_str(&format!("\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\n"));
+        } else if member.starts_with("adapter-") {
+            cargo.push_str(&format!(
+                "\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n"
+            ));
+        } else if is_binary {
+            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = []\nheadless-test = []\n"));
+        }
+        write_file(root, &format!("{path}/Cargo.toml"), &cargo, &mut generated)?;
+        if is_binary {
+            let attr = if model.platform.requires_windows_subsystem() {
+                "#![cfg_attr(target_os = \"windows\", windows_subsystem = \"windows\")]\n"
+            } else {
+                ""
+            };
+            write_file(
+                root,
+                &format!("{path}/src/main.rs"),
+                &format!(
+                    "{attr}fn main() {{ println!(\"{}\"); }}\n",
+                    config.window_title
+                ),
+                &mut generated,
+            )?;
+        } else {
+            let body = match member {
+                "config" => "#[derive(Debug, Clone, Default)]\npub struct AppearanceSettings { pub theme_mode: String, pub bubble_radius_px: f32 }\n",
+                "shared-utils" => "pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(\" \") }\n",
+                "domain" => "pub trait LocalReplicaRepositoryPort { fn load(&self, key: &str) -> Option<String>; }\n",
+                "application" => "#[derive(Default)]\npub struct AppState { pub current_route: String }\n",
+                "adapter-platform" => "pub fn is_mobile_capacitor_plugin_enabled(_: &str) -> bool { false }\n",
+                _ => "// Adapter implementation seam.\n",
+            };
+            write_file(root, &format!("{path}/src/lib.rs"), body, &mut generated)?;
+        }
+    }
+    let desktop = format!("crates/{app}-desktop-app");
+    write_file(
+        root,
+        &format!("{desktop}/ui/theme/tokens.slint"),
+        &generate_theme_tokens_slint(model),
+        &mut generated,
+    )?;
+    write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "export component PopupButton inherits Rectangle {}\nexport component PopupField inherits Rectangle {}\n", &mut generated)?;
+    write_file(root, &format!("{desktop}/ui/app.slint"), &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nexport component MainWindow inherits Window {{ title: \"{}\"; }}\n", config.window_title), &mut generated)?;
+    write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
+    write_file(root, "scripts/check-slint-tokens.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n '#[0-9a-fA-F]{3,8}|border-radius: [0-9]+px|font-size: [0-9]+px' crates/*-desktop-app/ui/pages crates/*-desktop-app/ui/components --glob '*.slint'\n", &mut generated)?;
+    let revision = RustSlintTargetAdapter::read_target_revision(root);
+    RustSlintTargetAdapter::write_target_revision(root, revision)?;
+    Ok(TargetScaffoldSummary {
+        files_generated: generated,
+        target_crate_name: format!("{app}-desktop-app"),
+        has_windows_subsystem: model.platform.requires_windows_subsystem(),
+    })
 }
 
 fn write_file(
@@ -898,6 +1016,41 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
 
 fn generate_component_slint(comp: &ComponentNode) -> String {
     let comp_name = pascal_case(&sanitize_identifier(&comp.name));
+    let component_kind = comp.name.to_ascii_lowercase();
+    if component_kind.contains("video") {
+        return format!(
+            r#"import {{ ThemeTokens }} from "../theme/tokens.slint";
+
+export component {comp_name} inherits Rectangle {{
+    in-out property <image> current-frame;
+    in property <int> frame-count: 0;
+    in-out property <int> frame-index: 0;
+    callback frame-requested(int);
+    callback launch-external-player();
+    border-radius: ThemeTokens.border-radius;
+
+    Timer {{
+        interval: 33ms;
+        running: root.frame-count > 1;
+        triggered() => {{
+            root.frame-index = (root.frame-index + 1) % root.frame-count;
+            root.frame-requested(root.frame-index);
+        }}
+    }}
+    Image {{ source: root.current-frame; width: parent.width; height: parent.height; }}
+    TouchArea {{ clicked() => {{ root.launch-external-player(); }} }}
+}}
+"#,
+            comp_name = comp_name,
+        );
+    }
+    let circular = component_kind.contains("avatar")
+        || component_kind.contains("circle")
+        || component_kind.contains("iconbutton")
+        || component_kind.contains("icon-button");
+    let chat_stream = component_kind.contains("chat")
+        || component_kind.contains("message-list")
+        || component_kind.contains("messagelist");
     let mut props = String::new();
     for p in &comp.props {
         let prop_ident = sanitize_identifier(&p.name).replace('_', "-");
@@ -1098,6 +1251,17 @@ fn generate_component_slint(comp: &ComponentNode) -> String {
         element_nodes.push_str(&snippet);
     }
 
+    let radius_binding = if circular {
+        "self.height / 2"
+    } else {
+        "ThemeTokens.border-radius"
+    };
+    let (layout_open, layout_close) = if chat_stream {
+        ("    Flickable {\n        width: parent.width;\n        height: parent.height;\n        changed content-height => { self.content-y = min(0px, self.height - self.content-height); }\n        VerticalLayout {\n",
+         "        }\n    }\n")
+    } else {
+        ("    VerticalLayout {\n", "    }\n")
+    };
     format!(
         r#"import {{ ThemeTokens }} from "../theme/tokens.slint";
 
@@ -1105,9 +1269,9 @@ export component {comp_name} inherits Rectangle {{
 {props}    callback action-triggered(string);
     callback complete-all-triggered();
     callback tab-selected(string);
-    border-radius: ThemeTokens.border-radius;
+    border-radius: {radius_binding};
 
-    VerticalLayout {{
+{layout_open}
         spacing: ThemeTokens.spacing;
         padding: ThemeTokens.padding;
         Text {{
@@ -1115,9 +1279,12 @@ export component {comp_name} inherits Rectangle {{
             font-size: ThemeTokens.font-size;
             accessible-role: text;
         }}
-{element_nodes}    }}
+{element_nodes}{layout_close}
 }}
-"#
+"#,
+        radius_binding = radius_binding,
+        layout_open = layout_open,
+        layout_close = layout_close,
     )
 }
 

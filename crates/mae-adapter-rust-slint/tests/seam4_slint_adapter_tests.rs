@@ -106,6 +106,73 @@ fn scaffold_target_generates_canonical_windows_rust_slint_layout() {
 }
 
 #[test]
+fn scaffold_generates_exact_avatar_radius_and_bottom_pinned_chat_stream() {
+    let target_dir = unique_temp_dir("chat_primitives");
+    let mut model = sample_windows_semantic_model();
+    model
+        .components
+        .push(ComponentNode::new("Avatar", "Avatar", "src/Avatar.tsx"));
+    model.components.push(ComponentNode::new(
+        "ChatMessageList",
+        "ChatMessageList",
+        "src/ChatMessageList.tsx",
+    ));
+    model.components.push(ComponentNode::new(
+        "VideoAttachment",
+        "VideoAttachment",
+        "src/VideoAttachment.tsx",
+    ));
+    RustSlintTargetAdapter::default()
+        .scaffold_target(&model, target_dir.to_str().unwrap())
+        .expect("scaffold target");
+
+    let avatar = fs::read_to_string(target_dir.join("ui/components/avatar.slint")).unwrap();
+    assert!(avatar.contains("border-radius: self.height / 2;"));
+    let chat = fs::read_to_string(target_dir.join("ui/components/chatmessagelist.slint")).unwrap();
+    assert!(chat.contains("Flickable {"));
+    assert!(chat.contains("changed content-height => { self.content-y = min(0px, self.height - self.content-height); }"));
+    let video = fs::read_to_string(target_dir.join("ui/components/videoattachment.slint")).unwrap();
+    assert!(video.contains("interval: 33ms;"));
+    assert!(video.contains("callback frame-requested(int);"));
+    assert!(video.contains("callback launch-external-player();"));
+    let _ = fs::remove_dir_all(&target_dir);
+}
+
+#[test]
+fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
+    let target_dir = unique_temp_dir("modular_monolith");
+    let adapter = RustSlintTargetAdapter::default()
+        .with_topology(mae_adapter_rust_slint::WorkspaceTopology::ModularMonolith);
+    adapter
+        .scaffold_target(
+            &sample_windows_semantic_model(),
+            target_dir.to_str().unwrap(),
+        )
+        .unwrap();
+    let cargo = fs::read_to_string(target_dir.join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("members"));
+    assert!(target_dir
+        .join("crates/migrated-slint-desktop-app/ui/components/ui/popup_primitives.slint")
+        .exists());
+    assert!(target_dir
+        .join("scripts/check-solid-boundaries.sh")
+        .exists());
+    assert!(target_dir.join("scripts/check-slint-tokens.sh").exists());
+
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--workspace", "--no-run"])
+        .current_dir(&target_dir)
+        .output()
+        .expect("run generated workspace tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(&target_dir);
+}
+
+#[test]
 fn scaffold_target_enforces_windows_gui_subsystem_attribute_in_main_rs() {
     let target_dir = unique_temp_dir("win_subsys");
     let model = sample_windows_semantic_model();

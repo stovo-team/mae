@@ -6,4 +6,4 @@
 
 pub mod codegen;
 
-pub use codegen::{RustSlintAdapterConfig, RustSlintTargetAdapter};
+pub use codegen::{RustSlintAdapterConfig, RustSlintTargetAdapter, WorkspaceTopology};
