@@ -168,6 +168,19 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
     let appearance = fs::read_to_string(target_dir.join("appearance.toml")).unwrap();
     assert!(appearance.contains("bubble_radius_px = 16"));
     assert!(appearance.contains("primary_color = \"#2563eb\""));
+    for setting in [
+        "control_radius_px = 12",
+        "icon_size_px = 20",
+        "font_size_px = 14",
+        "motion_duration_ms = 180",
+        "app_title_en = \"Workspace\"",
+        "app_title_ru = \"Рабочее пространство\"",
+    ] {
+        assert!(
+            appearance.contains(setting),
+            "missing config setting {setting}"
+        );
+    }
     let generated_main =
         fs::read_to_string(target_dir.join("crates/migrated-slint-desktop-app/src/main.rs"))
             .unwrap();
