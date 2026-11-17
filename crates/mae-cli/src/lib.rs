@@ -497,6 +497,7 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
                 .iter()
                 .position(|arg| arg == "--source")
                 .and_then(|idx| pos.get(idx + 1));
+            let live_visual = visual && source_option.is_none();
             let visual_positional_target = if pos.get(2).map(String::as_str) == Some("--visual") {
                 pos.get(3).filter(|arg| arg.as_str() != "--source")
             } else {
@@ -508,6 +509,20 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
                 pos.get(2)
             };
             let target_dir = PathBuf::from(target_arg.map(String::as_str).unwrap_or("target/mvp"));
+            let source_dir = if visual {
+                Some(PathBuf::from(source_option.or_else(|| {
+                    if pos.get(2).map(String::as_str) == Some("--visual") {
+                        pos.get(4)
+                    } else {
+                        pos.get(3)
+                    }
+                }).map(String::as_str).unwrap_or("fixtures/react-rust-slint/source")))
+            } else {
+                None
+            };
+            let live_summary = live_visual.then(|| source_dir.as_ref().expect("visual source directory was configured")).map(|source| {
+                visual_capture::verify_live_source(source, &target_dir)
+            }).transpose()?;
             let native = NativeComplianceVerifier::for_platform(&target_dir, platform);
             let (status, violations) = native.inspect_target()?;
             if !status.is_pass() {
@@ -517,13 +532,7 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
                 )));
             }
             if visual {
-                let source_dir = PathBuf::from(source_option.or_else(|| {
-                    if pos.get(2).map(String::as_str) == Some("--visual") {
-                        pos.get(4)
-                    } else {
-                        pos.get(3)
-                    }
-                }).map(String::as_str).unwrap_or("fixtures/react-rust-slint/source"));
+                let source_dir = source_dir.expect("visual source directory was configured");
                 let (model, _, _) = analyze_react_fixture_for_platform(&source_dir, platform)?;
                 let layout = model.layout_constraints.first();
                 let token = model.style_tokens.iter().find(|t| {
@@ -556,8 +565,10 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
                 if !evidence.status.is_pass() {
                     return Err(DomainError::PortError(format!("MAE Visual Verify Failed: {}", evidence.summary)));
                 }
-                let live_summary = visual_capture::verify_live_source(&source_dir, &target_dir)?;
-                return Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, static_visual_status=PASS, {}", platform, live_summary));
+                if let Some(live_summary) = live_summary {
+                    return Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, static_visual_status=PASS, {}", platform, live_summary));
+                }
+                return Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, static_visual_status=PASS (source and generated declarations; no screenshot capture)", platform));
             }
             Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, violations=0", platform))
         }
