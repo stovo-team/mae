@@ -193,11 +193,41 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
     let appearance = fs::read_to_string(target_dir.join("appearance.toml")).unwrap();
     assert!(appearance.contains("bubble_radius_px = 16"));
     assert!(appearance.contains("primary_color = \"#2563eb\""));
+    for setting in [
+        "control_radius_px = 12",
+        "icon_size_px = 20",
+        "font_size_px = 14",
+        "motion_duration_ms = 180",
+        "app_title_en = \"Workspace\"",
+        "app_title_ru = \"Рабочее пространство\"",
+    ] {
+        assert!(
+            appearance.contains(setting),
+            "missing config setting {setting}"
+        );
+    }
     let generated_main =
         fs::read_to_string(target_dir.join("crates/migrated-slint-desktop-app/src/main.rs"))
             .unwrap();
     assert!(generated_main.contains("MAE_CONFIG"));
     assert!(generated_main.contains("AppearanceSettings::from_toml"));
+    assert!(generated_main.contains("MAE_VISUAL_ROUTE"));
+    assert!(generated_main.contains("MAE_VISUAL_OUTPUT"));
+    assert!(generated_main.contains("take_snapshot"));
+    let app_source =
+        fs::read_to_string(target_dir.join("crates/migrated-slint-application/src/lib.rs"))
+            .unwrap();
+    assert!(app_source.contains("pub enum AppEvent"));
+    assert!(app_source.contains("pub fn reduce"));
+    assert!(app_source.contains("pub fn seed_mock_workspace"));
+    let desktop_manifest =
+        fs::read_to_string(target_dir.join("crates/migrated-slint-desktop-app/Cargo.toml"))
+            .unwrap();
+    assert!(desktop_manifest.contains("slint-build"));
+    assert!(desktop_manifest.contains("headless-test"));
+    assert!(target_dir
+        .join("crates/migrated-slint-desktop-app/build.rs")
+        .exists());
     let clean_lint = std::process::Command::new("bash")
         .arg("scripts/check-slint-tokens.sh")
         .current_dir(&target_dir)
@@ -227,7 +257,7 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
     fs::remove_file(violation).unwrap();
 
     let output = std::process::Command::new("cargo")
-        .args(["test", "--workspace"])
+        .args(["test", "--workspace", "--no-default-features"])
         .current_dir(&target_dir)
         .output()
         .expect("run generated workspace tests");
@@ -236,6 +266,51 @@ fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let headless = std::process::Command::new("cargo")
+        .args([
+            "test",
+            "-p",
+            "migrated-slint-desktop-app",
+            "--no-default-features",
+            "--features",
+            "headless-test",
+        ])
+        .current_dir(&target_dir)
+        .output()
+        .expect("run generated desktop headless tests");
+    assert!(
+        headless.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&headless.stdout),
+        String::from_utf8_lossy(&headless.stderr)
+    );
+    let native_image = target_dir.join(".mae-visual/native/settings.ppm");
+    fs::create_dir_all(native_image.parent().unwrap()).unwrap();
+    let manifest = target_dir.join("crates/migrated-slint-desktop-app/Cargo.toml");
+    let capture = std::process::Command::new("cargo")
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--no-default-features",
+            "--features",
+            "headless-test",
+        ])
+        .current_dir(&target_dir)
+        .env("MAE_VISUAL_ROUTE", "/settings")
+        .env("MAE_VISUAL_OUTPUT", &native_image)
+        .output()
+        .expect("capture a generated native Slint route");
+    assert!(
+        capture.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&capture.stdout),
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    assert!(fs::read(&native_image)
+        .unwrap()
+        .starts_with(b"P6\n1280 800\n255\n"));
     let _ = fs::remove_dir_all(&target_dir);
 }
 
