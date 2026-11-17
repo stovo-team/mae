@@ -139,28 +139,38 @@ fn scaffold_generates_exact_avatar_radius_and_bottom_pinned_chat_stream() {
     assert!(video.contains("callback launch-external-player();"));
     let cargo = fs::read_to_string(target_dir.join("Cargo.toml")).unwrap();
     assert!(cargo.contains("inline-video"));
+    assert!(cargo.contains("slint-build"));
+    let app_ui = fs::read_to_string(target_dir.join("ui/app.slint")).unwrap();
+    assert!(app_ui.contains("VideoAttachment {"));
+    assert!(app_ui.contains("frames: root.video-frames;"));
+    let main = fs::read_to_string(target_dir.join("src/main.rs")).unwrap();
+    assert!(main.contains("set_video_frames"));
+    assert!(main.contains("open_external_player"));
+    assert!(main.contains("ui.run()"));
+    let build_script = fs::read_to_string(target_dir.join("build.rs")).unwrap();
+    assert!(build_script.contains("slint_build::compile(\"ui/app.slint\")"));
     let media = fs::read_to_string(target_dir.join("src/app/media.rs")).unwrap();
     assert!(media.contains("pub fn extract_video_frames"));
     assert!(media.contains("pub fn load_video_images"));
     assert!(media.contains("fps=30"));
     assert!(media.contains("pub fn open_external_player"));
-    let output = std::process::Command::new("cargo")
-        .args(["test", "--no-run"])
-        .current_dir(&target_dir)
-        .output()
-        .expect("compile generated video target");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let target_cache = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let video_build = std::process::Command::new("cargo")
-        .args(["test", "--features", "inline-video"])
+        .args(["test"])
         .current_dir(&target_dir)
+        .env("CARGO_TARGET_DIR", target_cache)
         .env("CARGO_BUILD_JOBS", "1")
         .env("CARGO_PROFILE_DEV_DEBUG", "0")
         .output()
-        .expect("compile generated inline-video Slint image bridge");
+        .expect("compile and test generated native video application");
     assert!(
         video_build.status.success(),
         "{}",

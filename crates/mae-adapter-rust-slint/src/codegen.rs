@@ -115,11 +115,16 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         write_file(&root, "Cargo.toml", &cargo_toml, &mut files_generated)?;
 
         // 2. build.rs
-        let build_rs = generate_build_rs();
+        let build_rs = generate_build_rs(has_video);
         write_file(&root, "build.rs", &build_rs, &mut files_generated)?;
 
         // 3. src/main.rs (with Windows GUI subsystem attribute and/or Linux Wayland/X11 backend config)
-        let main_rs = generate_main_rs(&self.config, has_windows_subsystem, has_linux_desktop);
+        let main_rs = generate_main_rs(
+            &self.config,
+            has_windows_subsystem,
+            has_linux_desktop,
+            has_video,
+        );
         write_file(&root, "src/main.rs", &main_rs, &mut files_generated)?;
 
         // 4. src/lib.rs (exposes app module for headless integration tests)
@@ -526,7 +531,7 @@ fn generate_cargo_toml(crate_name: &str, platform: TargetPlatform, has_video: bo
         String::new()
     };
     let video_dependencies = if has_video {
-        "\n[dependencies]\nslint = { version = \"=1.18.1\", default-features = false, features = [\"std\", \"compat-1-18\"], optional = true }\nimage = { version = \"0.25\", default-features = false, features = [\"png\"], optional = true }\n\n[features]\ninline-video = [\"dep:slint\", \"dep:image\"]\n".to_string()
+        "\n[dependencies]\nslint = { version = \"=1.18.1\", default-features = false, features = [\"std\", \"compat-1-18\", \"backend-default\", \"renderer-software\"], optional = true }\nimage = { version = \"0.25\", default-features = false, features = [\"png\"], optional = true }\n\n[build-dependencies]\nslint-build = \"=1.18.1\"\n\n[features]\ndefault = [\"inline-video\"]\ninline-video = [\"dep:slint\", \"dep:image\"]\n".to_string()
     } else {
         String::new()
     };
@@ -554,7 +559,12 @@ embedded_browser = false
     )
 }
 
-fn generate_build_rs() -> String {
+fn generate_build_rs(has_video: bool) -> String {
+    let slint_compile = if has_video {
+        "    slint_build::compile(\"ui/app.slint\").expect(\"compile generated Slint application\");\n"
+    } else {
+        ""
+    };
     r#"use std::path::Path;
 
 fn main() {
@@ -564,15 +574,17 @@ fn main() {
         Path::new("ui/app.slint").exists(),
         "Slint entrypoint ui/app.slint must exist"
     );
+{slint_compile}
 }
 "#
-    .to_string()
+    .replace("{slint_compile}", slint_compile)
 }
 
 fn generate_main_rs(
     config: &RustSlintAdapterConfig,
     has_windows_subsystem: bool,
     has_linux_desktop: bool,
+    has_video: bool,
 ) -> String {
     let win_attr = if has_windows_subsystem {
         "#![cfg_attr(target_os = \"windows\", windows_subsystem = \"windows\")]\n"
@@ -584,6 +596,32 @@ fn generate_main_rs(
     } else {
         ""
     };
+    if has_video {
+        return format!(
+            r#"{win_attr}pub mod app;
+slint::include_modules!();
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    let ui = MainWindow::new()?;
+    let source = std::env::var_os("MAE_VIDEO_PATH").map(std::path::PathBuf::from);
+    if let Some(source) = &source {{
+        let cache = std::env::var_os("MAE_VIDEO_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("mae-video-cache"));
+        let paths = app::media::extract_video_frames(source, &cache)?;
+        let images = app::media::load_video_images(&paths)?;
+        ui.set_video_frames(std::rc::Rc::new(slint::VecModel::from(images)).into());
+    }}
+    ui.on_launch_external_player(move || {{
+        if let Some(source) = &source {{ let _ = app::media::open_external_player(source); }}
+    }});
+    ui.run()?;
+    Ok(())
+}}
+"#,
+            win_attr = win_attr
+        );
+    }
     format!(
         r#"{win_attr}pub mod app;
 
@@ -1153,7 +1191,10 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
 
     let mut token_props = String::new();
     for token in &model.style_tokens {
-        let name = sanitize_identifier(&token.name).replace('_', "-");
+        let name = sanitize_identifier(&token.name)
+            .replace('_', "-")
+            .trim_start_matches('-')
+            .to_string();
         token_props.push_str(&format!(
             "    out property <string> {name}: \"{}\";\n",
             token.value
@@ -1192,7 +1233,11 @@ export component {comp_name} inherits Rectangle {{
         running: root.frames.length > 1;
         triggered() => {{
             if root.frames.length > 0 {{
-                root.frame-index = (root.frame-index + 1) % root.frames.length;
+                if root.frame-index + 1 < root.frames.length {{
+                    root.frame-index = root.frame-index + 1;
+                }} else {{
+                    root.frame-index = 0;
+                }}
             }}
         }}
     }}
@@ -1454,6 +1499,10 @@ export component {comp_name} inherits Rectangle {{
 fn generate_app_slint(config: &RustSlintAdapterConfig, model: &SemanticUiModel) -> String {
     let mut imports = String::from("import { ThemeTokens } from \"theme/tokens.slint\";\n");
     let mut child_instances = String::new();
+    let has_video = model
+        .components
+        .iter()
+        .any(|component| component.name.to_ascii_lowercase().contains("video"));
 
     for comp in &model.components {
         if comp.name.eq_ignore_ascii_case("App") {
@@ -1465,9 +1514,20 @@ fn generate_app_slint(config: &RustSlintAdapterConfig, model: &SemanticUiModel) 
             format!("import {{ {comp_ident} }} from \"components/{file_stem}.slint\";\n");
         if !imports.contains(&import_line) {
             imports.push_str(&import_line);
-            child_instances.push_str(&format!("            {comp_ident} {{}}\n"));
+            if comp.name.to_ascii_lowercase().contains("video") {
+                child_instances.push_str(&format!(
+                    "            {comp_ident} {{ width: parent.width; height: 240px; frames: root.video-frames; launch-external-player => {{ root.launch-external-player(); }} }}\n"
+                ));
+            } else {
+                child_instances.push_str(&format!("            {comp_ident} {{}}\n"));
+            }
         }
     }
+    let video_bindings = if has_video {
+        "    in property <[image]> video-frames;\n    callback launch-external-player();\n"
+    } else {
+        ""
+    };
 
     let mut state_props = String::new();
     for field in &model.state_fields {
@@ -1502,6 +1562,7 @@ export component MainWindow inherits Window {{
     in-out property <string> theme-mode: "dark-slate";
     in-out property <string> time-range: "30d";
     in-out property <string> task-priority: "high";
+{video_bindings}
 {state_props}
     callback navigate(string);
     callback submit-item(string);
@@ -1535,6 +1596,7 @@ export component MainWindow inherits Window {{
         height = config.window_height,
         state_props = state_props,
         callbacks = callbacks,
+        video_bindings = video_bindings,
         child_instances = child_instances
     )
 }
