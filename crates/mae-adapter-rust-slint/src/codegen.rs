@@ -369,17 +369,29 @@ pub struct AppearanceSettings {
     pub brand: String,
     pub theme_mode: String,
     pub bubble_radius_px: f32,
+    pub control_radius_px: f32,
     pub spacing_px: f32,
+    pub icon_size_px: f32,
+    pub font_size_px: f32,
     pub motion_scale: f32,
+    pub motion_duration_ms: f32,
     pub primary_color: String,
     pub secondary_color: String,
+    pub surface_color: String,
     pub strings_locale: String,
+    pub app_title_en: String,
+    pub app_title_ru: String,
+    pub chat_empty_en: String,
+    pub chat_empty_ru: String,
 }
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self { brand: "MAE".into(), theme_mode: "system".into(), bubble_radius_px: 16.0,
-            spacing_px: 8.0, motion_scale: 1.0, primary_color: "#2563eb".into(),
-            secondary_color: "#64748b".into(), strings_locale: "en".into() }
+            control_radius_px: 12.0, spacing_px: 8.0, icon_size_px: 20.0, font_size_px: 14.0,
+            motion_scale: 1.0, motion_duration_ms: 180.0, primary_color: "#2563eb".into(),
+            secondary_color: "#64748b".into(), surface_color: "#ffffff".into(), strings_locale: "en".into(),
+            app_title_en: "Workspace".into(), app_title_ru: "Рабочее пространство".into(),
+            chat_empty_en: "No messages".into(), chat_empty_ru: "Нет сообщений".into() }
     }
 }
 impl AppearanceSettings {
@@ -397,9 +409,14 @@ impl AppearanceSettings {
             let number = || value.parse::<f32>().map_err(|_| format!("{key} must be a number"));
             match key {
                 "brand" => settings.brand = string()?, "theme_mode" => settings.theme_mode = string()?,
-                "bubble_radius_px" => settings.bubble_radius_px = number()?, "spacing_px" => settings.spacing_px = number()?,
-                "motion_scale" => settings.motion_scale = number()?, "primary_color" => settings.primary_color = string()?,
-                "secondary_color" => settings.secondary_color = string()?, "strings_locale" => settings.strings_locale = string()?,
+                "bubble_radius_px" => settings.bubble_radius_px = number()?, "control_radius_px" => settings.control_radius_px = number()?,
+                "spacing_px" => settings.spacing_px = number()?, "icon_size_px" => settings.icon_size_px = number()?,
+                "font_size_px" => settings.font_size_px = number()?, "motion_scale" => settings.motion_scale = number()?,
+                "motion_duration_ms" => settings.motion_duration_ms = number()?, "primary_color" => settings.primary_color = string()?,
+                "secondary_color" => settings.secondary_color = string()?, "surface_color" => settings.surface_color = string()?,
+                "strings_locale" => settings.strings_locale = string()?, "app_title_en" => settings.app_title_en = string()?,
+                "app_title_ru" => settings.app_title_ru = string()?, "chat_empty_en" => settings.chat_empty_en = string()?,
+                "chat_empty_ru" => settings.chat_empty_ru = string()?,
                 _ => {}
             }
         }
@@ -411,10 +428,14 @@ mod tests {
     use super::AppearanceSettings;
     #[test]
     fn applies_toml_overrides_and_preserves_defaults() {
-        let settings = AppearanceSettings::from_toml("brand = \"Stovo\"\nbubble_radius_px = 20\nprimary_color = \"#123456\"\n").unwrap();
+        let settings = AppearanceSettings::from_toml("brand = \"Stovo\"\nbubble_radius_px = 20\ncontrol_radius_px = 10\nfont_size_px = 16\nmotion_duration_ms = 220\nprimary_color = \"#123456\"\napp_title_ru = \"Пространство\"\n").unwrap();
         assert_eq!(settings.brand, "Stovo");
         assert_eq!(settings.bubble_radius_px, 20.0);
+        assert_eq!(settings.control_radius_px, 10.0);
+        assert_eq!(settings.font_size_px, 16.0);
+        assert_eq!(settings.motion_duration_ms, 220.0);
         assert_eq!(settings.primary_color, "#123456");
+        assert_eq!(settings.app_title_ru, "Пространство");
         assert_eq!(settings.motion_scale, 1.0);
     }
 }
@@ -435,7 +456,7 @@ mod tests {
         &generate_theme_tokens_slint(model),
         &mut generated,
     )?;
-    write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\nspacing_px = 8\nmotion_scale = 1\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nstrings_locale = \"en\"\n", &mut generated)?;
+    write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\ncontrol_radius_px = 12\nspacing_px = 8\nicon_size_px = 20\nfont_size_px = 14\nmotion_scale = 1\nmotion_duration_ms = 180\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nsurface_color = \"#ffffff\"\nstrings_locale = \"en\"\napp_title_en = \"Workspace\"\napp_title_ru = \"Рабочее пространство\"\nchat_empty_en = \"No messages\"\nchat_empty_ru = \"Нет сообщений\"\n", &mut generated)?;
     write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "export component PopupButton inherits Rectangle {}\nexport component PopupField inherits Rectangle {}\n", &mut generated)?;
     write_file(root, &format!("{desktop}/ui/app.slint"), &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nexport component MainWindow inherits Window {{ title: \"{}\"; }}\n", config.window_title), &mut generated)?;
     write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
