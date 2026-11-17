@@ -137,19 +137,44 @@ fn scaffold_generates_exact_avatar_radius_and_bottom_pinned_chat_stream() {
     assert!(video.contains("root.frames[root.frame-index]"));
     assert!(!video.contains("callback frame-requested(int);"));
     assert!(video.contains("callback launch-external-player();"));
+    let cargo = fs::read_to_string(target_dir.join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("inline-video"));
+    assert!(cargo.contains("slint-build"));
+    let app_ui = fs::read_to_string(target_dir.join("ui/app.slint")).unwrap();
+    assert!(app_ui.contains("VideoAttachment {"));
+    assert!(app_ui.contains("frames: root.video-frames;"));
+    let main = fs::read_to_string(target_dir.join("src/main.rs")).unwrap();
+    assert!(main.contains("set_video_frames"));
+    assert!(main.contains("open_external_player"));
+    assert!(main.contains("ui.run()"));
+    let build_script = fs::read_to_string(target_dir.join("build.rs")).unwrap();
+    assert!(build_script.contains("slint_build::compile(\"ui/app.slint\")"));
     let media = fs::read_to_string(target_dir.join("src/app/media.rs")).unwrap();
     assert!(media.contains("pub fn extract_video_frames"));
+    assert!(media.contains("pub fn load_video_images"));
     assert!(media.contains("fps=30"));
     assert!(media.contains("pub fn open_external_player"));
-    let output = std::process::Command::new("cargo")
-        .args(["test", "--no-run"])
+    let target_cache = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let video_build = std::process::Command::new("cargo")
+        .args(["test"])
         .current_dir(&target_dir)
+        .env("CARGO_TARGET_DIR", target_cache)
+        .env("CARGO_BUILD_JOBS", "1")
+        .env("CARGO_PROFILE_DEV_DEBUG", "0")
         .output()
-        .expect("compile generated video target");
+        .expect("compile and test generated native video application");
     assert!(
-        output.status.success(),
+        video_build.status.success(),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&video_build.stderr)
     );
     let _ = fs::remove_dir_all(&target_dir);
 }
