@@ -75,14 +75,29 @@ impl NativeComplianceVerifier {
     /// Evaluates native compliance on `self.target_dir` and returns `(VerificationStatus, Vec<String>)` violations.
     pub fn inspect_target(&self) -> Result<(VerificationStatus, Vec<String>), DomainError> {
         let mut violations = Vec::new();
+        let cargo_files = files_with_extension(&self.target_dir, "toml")
+            .into_iter()
+            .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml"))
+            .collect::<Vec<_>>();
+        let source_files = files_with_extension(&self.target_dir, "rs")
+            .into_iter()
+            .filter(|path| {
+                path.ancestors()
+                    .any(|part| part.file_name().and_then(|name| name.to_str()) == Some("src"))
+            })
+            .collect::<Vec<_>>();
+        let is_workspace = self.target_dir.join("crates").is_dir()
+            || fs::read_to_string(self.target_dir.join("Cargo.toml"))
+                .map(|text| text.contains("[workspace]") && text.contains("members"))
+                .unwrap_or(false);
+        let main_rs_path = find_entrypoint(&self.target_dir, &source_files, is_workspace);
+        let reducer_path = find_state_or_reducer(&self.target_dir, &source_files, is_workspace);
+        let slint_path = find_app_slint(&self.target_dir, is_workspace);
 
-        let cargo_toml_path = self.target_dir.join("Cargo.toml");
-        let main_rs_path = self.target_dir.join("src/main.rs");
-
-        if !cargo_toml_path.exists() {
+        if !self.target_dir.join("Cargo.toml").exists() {
             violations.push("Missing Cargo.toml in target directory".to_string());
         }
-        if !main_rs_path.exists() {
+        if main_rs_path.is_none() {
             violations.push("Missing src/main.rs in target directory".to_string());
         }
 
@@ -95,16 +110,18 @@ impl NativeComplianceVerifier {
             if !core_mod_path.exists() {
                 violations.push("Missing src/core/mod.rs in CLI target directory".to_string());
             }
-            if let Ok(cargo_toml) = fs::read_to_string(&cargo_toml_path) {
-                let lower = cargo_toml.to_lowercase();
-                for token in FORBIDDEN_WRAPPER_TOKENS
-                    .iter()
-                    .chain(FORBIDDEN_CLI_WRAPPER_TOKENS.iter())
-                {
-                    if lower.contains(token) {
-                        violations.push(format!(
-                            "Forbidden wrapper dependency '{token}' detected in Cargo.toml"
-                        ));
+            for cargo_toml_path in &cargo_files {
+                if let Ok(cargo_toml) = fs::read_to_string(cargo_toml_path) {
+                    let lower = cargo_toml.to_lowercase();
+                    for token in FORBIDDEN_WRAPPER_TOKENS
+                        .iter()
+                        .chain(FORBIDDEN_CLI_WRAPPER_TOKENS.iter())
+                    {
+                        if lower.contains(token) {
+                            violations.push(format!(
+                                "Forbidden wrapper dependency '{token}' detected in Cargo.toml"
+                            ));
+                        }
                     }
                 }
             }
@@ -126,48 +143,49 @@ impl NativeComplianceVerifier {
             };
         }
 
-        let reducer_rs_path = self.target_dir.join("src/app/reducer.rs");
-        let app_slint_path = self.target_dir.join("ui/app.slint");
-
-        if !reducer_rs_path.exists() {
+        if reducer_path.is_none() {
             violations.push(
                 "Missing src/app/reducer.rs (Logic-UI separation violation: Rust reducer required)"
                     .to_string(),
             );
         }
-        if !app_slint_path.exists() {
+        if slint_path.is_none() {
             violations.push("Missing ui/app.slint declarative Slint UI entrypoint".to_string());
         }
 
-        if let Ok(cargo_toml) = fs::read_to_string(&cargo_toml_path) {
-            let lower = cargo_toml.to_lowercase();
-            for token in FORBIDDEN_WRAPPER_TOKENS {
-                if lower.contains(token) {
-                    violations.push(format!(
-                        "Forbidden browser/wrapper dependency '{token}' detected in Cargo.toml"
-                    ));
+        for cargo_toml_path in &cargo_files {
+            if let Ok(cargo_toml) = fs::read_to_string(cargo_toml_path) {
+                let lower = cargo_toml.to_lowercase();
+                for token in FORBIDDEN_WRAPPER_TOKENS {
+                    if lower.contains(token) {
+                        violations.push(format!(
+                            "Forbidden browser/wrapper dependency '{token}' detected in Cargo.toml"
+                        ));
+                    }
                 }
-            }
-            if lower.contains("embedded_browser = true") {
-                violations.push("Cargo.toml declares embedded_browser = true".to_string());
+                if lower.contains("embedded_browser = true") {
+                    violations.push("Cargo.toml declares embedded_browser = true".to_string());
+                }
             }
         }
 
-        if let Ok(main_rs) = fs::read_to_string(&main_rs_path) {
-            let lower = main_rs.to_lowercase();
-            for token in FORBIDDEN_WRAPPER_TOKENS {
-                if lower.contains(token) {
-                    violations.push(format!(
-                        "Forbidden wrapper/proxy usage '{token}' detected in src/main.rs"
-                    ));
+        if let Some(main_rs_path) = &main_rs_path {
+            if let Ok(main_rs) = fs::read_to_string(main_rs_path) {
+                let lower = main_rs.to_lowercase();
+                for token in FORBIDDEN_WRAPPER_TOKENS {
+                    if lower.contains(token) {
+                        violations.push(format!(
+                            "Forbidden wrapper/proxy usage '{token}' detected in src/main.rs"
+                        ));
+                    }
                 }
-            }
-            if self.require_windows_subsystem
-                && !main_rs.contains("windows_subsystem = \"windows\"")
-            {
-                violations.push(
+                if self.require_windows_subsystem
+                    && !main_rs.contains("windows_subsystem = \"windows\"")
+                {
+                    violations.push(
                     "Missing Windows GUI subsystem attribute `#![cfg_attr(target_os = \"windows\", windows_subsystem = \"windows\")]` in src/main.rs".to_string(),
                 );
+                }
             }
         }
 
@@ -196,30 +214,44 @@ impl NativeComplianceVerifier {
             }
         }
 
-        if let Ok(app_slint) = fs::read_to_string(&app_slint_path) {
-            if !app_slint.contains("inherits Window") {
-                violations.push(
-                    "ui/app.slint does not declare a native Slint Window component".to_string(),
-                );
-            }
-            // Reject screenshot-as-UI cheat (static screenshot image with zero callbacks/properties)
-            let has_screenshot_cheat = app_slint.to_lowercase().contains("screenshot_as_ui")
-                || (app_slint.contains("Image {")
-                    && !app_slint.contains("callback ")
-                    && !app_slint.contains("in-out property"));
-            if has_screenshot_cheat {
-                violations.push(
+        if let Some(app_slint_path) = &slint_path {
+            if let Ok(app_slint) = fs::read_to_string(app_slint_path) {
+                if !app_slint.contains("inherits Window") {
+                    violations.push(
+                        "ui/app.slint does not declare a native Slint Window component".to_string(),
+                    );
+                }
+                // Reject screenshot-as-UI cheat (static screenshot image with zero callbacks/properties)
+                let has_screenshot_cheat = app_slint.to_lowercase().contains("screenshot_as_ui")
+                    || (app_slint.contains("Image {")
+                        && !app_slint.contains("callback ")
+                        && !app_slint.contains("in-out property"));
+                if has_screenshot_cheat {
+                    violations.push(
                     "Screenshot-as-UI violation: ui/app.slint substitutes a static image for interactive Slint controls".to_string(),
                 );
+                }
             }
         }
 
         // Also scan all .rs files under src/ for forbidden wrapper tokens
-        scan_rs_files_for_tokens(
-            &self.target_dir.join("src"),
-            FORBIDDEN_WRAPPER_TOKENS,
-            &mut violations,
-        );
+        for source_file in &source_files {
+            if let Ok(content) = fs::read_to_string(source_file) {
+                let lower = content.to_lowercase();
+                for token in FORBIDDEN_WRAPPER_TOKENS {
+                    if lower.contains(token) {
+                        let message = format!(
+                            "Forbidden wrapper/proxy token '{}' in {}",
+                            token,
+                            source_file.display()
+                        );
+                        if !violations.contains(&message) {
+                            violations.push(message);
+                        }
+                    }
+                }
+            }
+        }
 
         if violations.is_empty() {
             Ok((VerificationStatus::Pass, violations))
@@ -227,6 +259,102 @@ impl NativeComplianceVerifier {
             Ok((VerificationStatus::Fail, violations))
         }
     }
+}
+
+fn files_with_extension(root: &Path, extension: &str) -> Vec<PathBuf> {
+    fn visit(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("target" | ".git")
+                ) {
+                    visit(&path, extension, files);
+                }
+            } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, extension, &mut files);
+    files.sort();
+    files
+}
+
+fn find_entrypoint(root: &Path, files: &[PathBuf], workspace: bool) -> Option<PathBuf> {
+    files
+        .iter()
+        .find(|path| {
+            path.ends_with("src/main.rs")
+                && (!workspace || path.components().any(|part| part.as_os_str() == "crates"))
+                && (!workspace || path.to_string_lossy().contains("-desktop-app"))
+        })
+        .cloned()
+        .or_else(|| {
+            if workspace {
+                None
+            } else {
+                Some(root.join("src/main.rs")).filter(|path| path.is_file())
+            }
+        })
+}
+
+fn find_state_or_reducer(root: &Path, files: &[PathBuf], workspace: bool) -> Option<PathBuf> {
+    files
+        .iter()
+        .find(|path| {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            (name == "state.rs" || name == "reducer.rs")
+                && (!workspace || path.to_string_lossy().contains("-application"))
+        })
+        .cloned()
+        .or_else(|| {
+            if workspace {
+                None
+            } else {
+                [
+                    root.join("src/app/reducer.rs"),
+                    root.join("src/app/state.rs"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file())
+            }
+        })
+}
+
+fn find_app_slint(root: &Path, workspace: bool) -> Option<PathBuf> {
+    let conventional = root.join("ui/app.slint");
+    if conventional.is_file() {
+        return Some(conventional);
+    }
+    if workspace {
+        let path = root.join("crates");
+        let mut stack = vec![path];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.is_dir() {
+                    stack.push(child);
+                } else if child.ends_with("ui/app.slint")
+                    && child.to_string_lossy().contains("-desktop-app")
+                {
+                    return Some(child);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn scan_rs_files_for_tokens(dir: &Path, tokens: &[&str], violations: &mut Vec<String>) {

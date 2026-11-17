@@ -163,6 +163,55 @@ fn native_compliance_verifier_rejects_missing_windows_subsystem_attribute() {
 }
 
 #[test]
+fn native_compliance_verifier_accepts_modular_monolith_and_scans_member_crates() {
+    let target_dir = unique_temp_dir("native_workspace");
+    fs::create_dir_all(target_dir.join("crates/product-desktop-app/src")).unwrap();
+    fs::create_dir_all(target_dir.join("crates/product-desktop-app/ui")).unwrap();
+    fs::create_dir_all(target_dir.join("crates/product-application/src")).unwrap();
+    fs::write(
+        target_dir.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        target_dir.join("crates/product-desktop-app/Cargo.toml"),
+        "[package]\nname=\"product-desktop-app\"\n",
+    )
+    .unwrap();
+    fs::write(
+        target_dir.join("crates/product-desktop-app/src/main.rs"),
+        "fn main() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        target_dir.join("crates/product-application/src/state.rs"),
+        "pub struct AppState;\n",
+    )
+    .unwrap();
+    fs::write(
+        target_dir.join("crates/product-desktop-app/ui/app.slint"),
+        "export component MainWindow inherits Window {}\n",
+    )
+    .unwrap();
+
+    let verifier = NativeComplianceVerifier::new(&target_dir, false);
+    assert_eq!(
+        verifier.inspect_target().unwrap().0,
+        VerificationStatus::Pass
+    );
+
+    fs::write(
+        target_dir.join("crates/product-application/Cargo.toml"),
+        "[dependencies]\nwry = \"1\"\n",
+    )
+    .unwrap();
+    let (status, violations) = verifier.inspect_target().unwrap();
+    assert_eq!(status, VerificationStatus::Fail);
+    assert!(violations.iter().any(|line| line.contains("wry")));
+    let _ = fs::remove_dir_all(&target_dir);
+}
+
+#[test]
 fn build_verifier_executes_real_cargo_test_on_generated_target_crate() {
     let target_dir = unique_temp_dir("cargo_test_real");
     let adapter = RustSlintTargetAdapter::default();
