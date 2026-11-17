@@ -101,21 +101,30 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
             .map_err(|e| DomainError::PortError(format!("Failed to create tests: {e}")))?;
 
         let crate_name = sanitize_crate_name(&self.config.crate_name);
+        let has_video = model
+            .components
+            .iter()
+            .any(|component| component.name.to_ascii_lowercase().contains("video"));
         let has_windows_subsystem = model.platform.requires_windows_subsystem();
         let has_linux_desktop = model.platform.requires_linux_desktop_entry();
 
         let mut files_generated = Vec::new();
 
         // 1. Cargo.toml
-        let cargo_toml = generate_cargo_toml(&crate_name, model.platform);
+        let cargo_toml = generate_cargo_toml(&crate_name, model.platform, has_video);
         write_file(&root, "Cargo.toml", &cargo_toml, &mut files_generated)?;
 
         // 2. build.rs
-        let build_rs = generate_build_rs();
+        let build_rs = generate_build_rs(has_video);
         write_file(&root, "build.rs", &build_rs, &mut files_generated)?;
 
         // 3. src/main.rs (with Windows GUI subsystem attribute and/or Linux Wayland/X11 backend config)
-        let main_rs = generate_main_rs(&self.config, has_windows_subsystem, has_linux_desktop);
+        let main_rs = generate_main_rs(
+            &self.config,
+            has_windows_subsystem,
+            has_linux_desktop,
+            has_video,
+        );
         write_file(&root, "src/main.rs", &main_rs, &mut files_generated)?;
 
         // 4. src/lib.rs (exposes app module for headless integration tests)
@@ -123,10 +132,6 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         write_file(&root, "src/lib.rs", &lib_rs, &mut files_generated)?;
 
         // 5. src/app/{mod,api_client,state,events,reducer,effects,navigation}.rs
-        let has_video = model
-            .components
-            .iter()
-            .any(|component| component.name.to_ascii_lowercase().contains("video"));
         write_file(
             &root,
             "src/app/mod.rs",
@@ -344,7 +349,7 @@ fn scaffold_modular_monolith(
                 "\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n"
             ));
         } else if is_binary {
-            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = []\nheadless-test = []\n"));
+            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\nslint = {{ version = \"=1.18.1\", default-features = false, features = [\"std\", \"compat-1-18\"] }}\ni-slint-backend-testing = {{ version = \"=1.18.1\", optional = true }}\n\n[build-dependencies]\nslint-build = \"=1.18.1\"\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = [\"slint/backend-default\", \"slint/renderer-femtovg\"]\nheadless-test = [\"slint/system-testing\", \"slint/renderer-software\", \"dep:i-slint-backend-testing\"]\n"));
         }
         write_file(root, &format!("{path}/Cargo.toml"), &cargo, &mut generated)?;
         if is_binary {
@@ -356,10 +361,13 @@ fn scaffold_modular_monolith(
             write_file(
                 root,
                 &format!("{path}/src/main.rs"),
-                &format!(
-                    "{attr}fn main() {{ let path = std::env::var_os(\"MAE_CONFIG\").unwrap_or_else(|| \"appearance.toml\".into()); let settings = std::fs::read_to_string(path).ok().and_then(|source| {app_module}_config::AppearanceSettings::from_toml(&source).ok()).unwrap_or_default(); println!(\"{}: {{}}\", settings.brand); }}\n",
-                    config.window_title
-                ),
+                &generate_modular_desktop_main_rs(&app_module, attr),
+                &mut generated,
+            )?;
+            write_file(
+                root,
+                &format!("{path}/build.rs"),
+                "fn main() { slint_build::compile(\"ui/app.slint\").expect(\"compile modular Slint UI\"); }\n",
                 &mut generated,
             )?;
         } else {
@@ -369,17 +377,29 @@ pub struct AppearanceSettings {
     pub brand: String,
     pub theme_mode: String,
     pub bubble_radius_px: f32,
+    pub control_radius_px: f32,
     pub spacing_px: f32,
+    pub icon_size_px: f32,
+    pub font_size_px: f32,
     pub motion_scale: f32,
+    pub motion_duration_ms: f32,
     pub primary_color: String,
     pub secondary_color: String,
+    pub surface_color: String,
     pub strings_locale: String,
+    pub app_title_en: String,
+    pub app_title_ru: String,
+    pub chat_empty_en: String,
+    pub chat_empty_ru: String,
 }
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self { brand: "MAE".into(), theme_mode: "system".into(), bubble_radius_px: 16.0,
-            spacing_px: 8.0, motion_scale: 1.0, primary_color: "#2563eb".into(),
-            secondary_color: "#64748b".into(), strings_locale: "en".into() }
+            control_radius_px: 12.0, spacing_px: 8.0, icon_size_px: 20.0, font_size_px: 14.0,
+            motion_scale: 1.0, motion_duration_ms: 180.0, primary_color: "#2563eb".into(),
+            secondary_color: "#64748b".into(), surface_color: "#ffffff".into(), strings_locale: "en".into(),
+            app_title_en: "Workspace".into(), app_title_ru: "Рабочее пространство".into(),
+            chat_empty_en: "No messages".into(), chat_empty_ru: "Нет сообщений".into() }
     }
 }
 impl AppearanceSettings {
@@ -397,9 +417,14 @@ impl AppearanceSettings {
             let number = || value.parse::<f32>().map_err(|_| format!("{key} must be a number"));
             match key {
                 "brand" => settings.brand = string()?, "theme_mode" => settings.theme_mode = string()?,
-                "bubble_radius_px" => settings.bubble_radius_px = number()?, "spacing_px" => settings.spacing_px = number()?,
-                "motion_scale" => settings.motion_scale = number()?, "primary_color" => settings.primary_color = string()?,
-                "secondary_color" => settings.secondary_color = string()?, "strings_locale" => settings.strings_locale = string()?,
+                "bubble_radius_px" => settings.bubble_radius_px = number()?, "control_radius_px" => settings.control_radius_px = number()?,
+                "spacing_px" => settings.spacing_px = number()?, "icon_size_px" => settings.icon_size_px = number()?,
+                "font_size_px" => settings.font_size_px = number()?, "motion_scale" => settings.motion_scale = number()?,
+                "motion_duration_ms" => settings.motion_duration_ms = number()?, "primary_color" => settings.primary_color = string()?,
+                "secondary_color" => settings.secondary_color = string()?, "surface_color" => settings.surface_color = string()?,
+                "strings_locale" => settings.strings_locale = string()?, "app_title_en" => settings.app_title_en = string()?,
+                "app_title_ru" => settings.app_title_ru = string()?, "chat_empty_en" => settings.chat_empty_en = string()?,
+                "chat_empty_ru" => settings.chat_empty_ru = string()?,
                 _ => {}
             }
         }
@@ -411,17 +436,83 @@ mod tests {
     use super::AppearanceSettings;
     #[test]
     fn applies_toml_overrides_and_preserves_defaults() {
-        let settings = AppearanceSettings::from_toml("brand = \"Stovo\"\nbubble_radius_px = 20\nprimary_color = \"#123456\"\n").unwrap();
+        let settings = AppearanceSettings::from_toml("brand = \"Stovo\"\nbubble_radius_px = 20\ncontrol_radius_px = 10\nfont_size_px = 16\nmotion_duration_ms = 220\nprimary_color = \"#123456\"\napp_title_ru = \"Пространство\"\n").unwrap();
         assert_eq!(settings.brand, "Stovo");
         assert_eq!(settings.bubble_radius_px, 20.0);
+        assert_eq!(settings.control_radius_px, 10.0);
+        assert_eq!(settings.font_size_px, 16.0);
+        assert_eq!(settings.motion_duration_ms, 220.0);
         assert_eq!(settings.primary_color, "#123456");
+        assert_eq!(settings.app_title_ru, "Пространство");
         assert_eq!(settings.motion_scale, 1.0);
     }
 }
 "##,
-                "shared-utils" => "pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(\" \") }\n",
+                "shared-utils" => r#"pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(" ") }
+
+pub fn strip_markdown(value: &str) -> String {
+    value.chars().filter(|ch| !matches!(ch, '*' | '_' | '`' | '#')).collect()
+}
+
+pub fn is_safe_link(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("https://") || value.starts_with("http://") || value.starts_with("mailto:")
+}
+
+pub fn shortcut_label(keys: &[&str]) -> String { keys.join("+") }
+
+#[cfg(test)]
+mod tests {
+    use super::{is_safe_link, normalize_whitespace, shortcut_label, strip_markdown};
+    #[test]
+    fn shared_text_helpers_are_deterministic() {
+        assert_eq!(normalize_whitespace("  hello   world "), "hello world");
+        assert_eq!(strip_markdown("**hello**"), "hello");
+        assert!(is_safe_link("https://example.com"));
+        assert!(!is_safe_link("javascript:alert(1)"));
+        assert_eq!(shortcut_label(&["Ctrl", "K"]), "Ctrl+K");
+    }
+}
+"#,
                 "domain" => "pub trait LocalReplicaRepositoryPort { fn load(&self, key: &str) -> Option<String>; }\n",
-                "application" => "#[derive(Default)]\npub struct AppState { pub current_route: String }\n",
+                "application" => r#"#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEvent { Navigate(String), Search(String), AddTask(String), LoadFinished }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppState { pub current_route: String, pub search: String, pub tasks: Vec<String>, pub loading: bool }
+
+impl Default for AppState {
+    fn default() -> Self { Self { current_route: "/".into(), search: String::new(), tasks: Vec::new(), loading: true } }
+}
+
+pub fn reduce(state: &mut AppState, event: AppEvent) {
+    match event {
+        AppEvent::Navigate(route) => state.current_route = route,
+        AppEvent::Search(value) => state.search = value,
+        AppEvent::AddTask(task) => state.tasks.push(task),
+        AppEvent::LoadFinished => state.loading = false,
+    }
+}
+
+pub fn seed_mock_workspace() -> AppState {
+    AppState { current_route: "/".into(), search: String::new(), tasks: vec!["Review migration".into(), "Verify native UI".into()], loading: false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reduce, seed_mock_workspace, AppEvent, AppState};
+    #[test]
+    fn reducer_and_seed_are_deterministic() {
+        let mut state = seed_mock_workspace();
+        reduce(&mut state, AppEvent::Navigate("/settings".into()));
+        reduce(&mut state, AppEvent::Search("design".into()));
+        assert_eq!(state.current_route, "/settings");
+        assert_eq!(state.search, "design");
+        assert_eq!(state.tasks.len(), 2);
+        assert_eq!(AppState::default().current_route, "/");
+    }
+}
+"#,
                 "adapter-platform" => "pub fn is_mobile_capacitor_plugin_enabled(_: &str) -> bool { false }\n",
                 _ => "// Adapter implementation seam.\n",
             };
@@ -435,9 +526,41 @@ mod tests {
         &generate_theme_tokens_slint(model),
         &mut generated,
     )?;
-    write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\nspacing_px = 8\nmotion_scale = 1\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nstrings_locale = \"en\"\n", &mut generated)?;
-    write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "export component PopupButton inherits Rectangle {}\nexport component PopupField inherits Rectangle {}\n", &mut generated)?;
-    write_file(root, &format!("{desktop}/ui/app.slint"), &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nexport component MainWindow inherits Window {{ title: \"{}\"; }}\n", config.window_title), &mut generated)?;
+    write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\ncontrol_radius_px = 12\nspacing_px = 8\nicon_size_px = 20\nfont_size_px = 14\nmotion_scale = 1\nmotion_duration_ms = 180\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nsurface_color = \"#ffffff\"\nstrings_locale = \"en\"\napp_title_en = \"Workspace\"\napp_title_ru = \"Рабочее пространство\"\nchat_empty_en = \"No messages\"\nchat_empty_ru = \"Нет сообщений\"\n", &mut generated)?;
+    write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "import { ThemeTokens } from \"../../theme/tokens.slint\";\nexport component PopupButton inherits Rectangle {\n    in property <string> text;\n    callback clicked;\n    height: ThemeTokens.control-height;\n    border-radius: ThemeTokens.control-radius;\n    background: ThemeTokens.primary-color;\n    Text { text: root.text; color: ThemeTokens.on-primary-color; vertical-alignment: center; horizontal-alignment: center; }\n    TouchArea { clicked => { root.clicked(); } }\n}\nexport component PopupField inherits Rectangle {\n    in-out property <string> text;\n    in property <string> placeholder;\n    height: ThemeTokens.control-height;\n    border-radius: ThemeTokens.control-radius;\n    border-width: 1px;\n    border-color: ThemeTokens.border-color;\n    TextInput { text <=> root.text; }\n    if root.text == \"\" : Text { text: root.placeholder; color: ThemeTokens.text-color; }\n}\n", &mut generated)?;
+    let app_slint = format!(
+        r#"import {{ ThemeTokens }} from "theme/tokens.slint";
+import {{ PopupButton, PopupField }} from "components/ui/popup_primitives.slint";
+export component MainWindow inherits Window {{
+    in-out property <string> brand: "{title}";
+    in-out property <string> current-route: "/";
+    title: root.brand;
+    min-width: 640px;
+    min-height: 480px;
+    preferred-width: {width}px;
+    preferred-height: {height}px;
+    Rectangle {{
+        border-radius: ThemeTokens.border-radius;
+        background: ThemeTokens.surface-color;
+        VerticalLayout {{ spacing: ThemeTokens.spacing; padding: ThemeTokens.padding;
+            Text {{ text: root.brand; color: ThemeTokens.text-color; font-size: ThemeTokens.font-size; }}
+            Text {{ text: root.current-route; color: ThemeTokens.text-color; }}
+            PopupField {{ text: ""; placeholder: "Search"; }}
+            PopupButton {{ text: "Continue"; }}
+        }}
+    }}
+}}
+"#,
+        title = config.window_title,
+        width = config.window_width,
+        height = config.window_height,
+    );
+    write_file(
+        root,
+        &format!("{desktop}/ui/app.slint"),
+        &app_slint,
+        &mut generated,
+    )?;
     write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
     write_file(
         root,
@@ -519,12 +642,18 @@ fn sanitize_identifier(raw: &str) -> String {
     }
 }
 
-fn generate_cargo_toml(crate_name: &str, platform: TargetPlatform) -> String {
+fn generate_cargo_toml(crate_name: &str, platform: TargetPlatform, has_video: bool) -> String {
     let desktop_entry_line = if platform.requires_linux_desktop_entry() {
         format!("desktop_entry = \"packaging/{crate_name}.desktop\"\n")
     } else {
         String::new()
     };
+    let video_dependencies = if has_video {
+        "\n[dependencies]\nslint = { version = \"=1.18.1\", default-features = false, features = [\"std\", \"compat-1-18\", \"backend-default\", \"renderer-software\"], optional = true }\nimage = { version = \"0.25\", default-features = false, features = [\"png\"], optional = true }\n\n[build-dependencies]\nslint-build = \"=1.18.1\"\n\n[features]\ndefault = [\"inline-video\"]\ninline-video = [\"dep:slint\", \"dep:image\"]\n".to_string()
+    } else {
+        String::new()
+    };
+    let generated_metadata = format!("{desktop_entry_line}{video_dependencies}");
     format!(
         r#"[package]
 name = "{crate_name}"
@@ -544,11 +673,16 @@ embedded_browser = false
         crate_name = crate_name,
         platform = platform.as_str(),
         window_backend = platform.native_window_backend(),
-        desktop_entry_line = desktop_entry_line
+        desktop_entry_line = generated_metadata
     )
 }
 
-fn generate_build_rs() -> String {
+fn generate_build_rs(has_video: bool) -> String {
+    let slint_compile = if has_video {
+        "    slint_build::compile(\"ui/app.slint\").expect(\"compile generated Slint application\");\n"
+    } else {
+        ""
+    };
     r#"use std::path::Path;
 
 fn main() {
@@ -558,15 +692,84 @@ fn main() {
         Path::new("ui/app.slint").exists(),
         "Slint entrypoint ui/app.slint must exist"
     );
+{slint_compile}
 }
 "#
-    .to_string()
+    .replace("{slint_compile}", slint_compile)
+}
+
+fn generate_modular_desktop_main_rs(app_module: &str, attr: &str) -> String {
+    r#"__WINDOW_ATTRIBUTE__slint::include_modules!();
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::var_os("MAE_CONFIG").unwrap_or_else(|| "appearance.toml".into());
+    let settings = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|source| __APP_MODULE___config::AppearanceSettings::from_toml(&source).ok())
+        .unwrap_or_default();
+
+    if let Ok(route) = std::env::var("MAE_VISUAL_ROUTE") {
+        #[cfg(feature = "headless-test")]
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
+        )))
+        .map_err(|error| format!("cannot initialize headless Slint renderer: {error}"))?;
+        #[cfg(not(feature = "headless-test"))]
+        return Err("native screenshot capture requires the headless-test feature".into());
+
+        let ui = MainWindow::new()?;
+        ui.set_brand(settings.brand.into());
+        ui.set_current_route(route.into());
+        ui.window()
+            .show()
+            .map_err(|error| format!("cannot show headless Slint window: {error}"))?;
+        let snapshot = ui
+            .window()
+            .take_snapshot()
+            .map_err(|error| format!("cannot render native Slint snapshot: {error}"))?;
+        let output = std::env::var_os("MAE_VISUAL_OUTPUT")
+            .ok_or("MAE_VISUAL_OUTPUT must name the native screenshot file")?;
+        let mut ppm = format!("P6\n{} {}\n255\n", snapshot.width(), snapshot.height()).into_bytes();
+        ppm.extend(snapshot.as_bytes().chunks_exact(4).flat_map(|pixel| pixel[..3].iter().copied()));
+        std::fs::write(&output, ppm).map_err(|error| {
+            format!(
+                "cannot write native Slint screenshot {}: {error}",
+                std::path::Path::new(&output).display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    let ui = MainWindow::new()?;
+    ui.set_brand(settings.brand.into());
+    ui.run()?;
+    Ok(())
+}
+
+#[cfg(all(test, feature = "headless-test"))]
+mod tests {
+    use super::MainWindow;
+
+    #[test]
+    fn constructs_window_with_headless_backend() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = MainWindow::new().unwrap();
+        assert!(!ui.get_brand().is_empty());
+    }
+}
+"#
+    .replace("__WINDOW_ATTRIBUTE__", attr)
+    .replace("__APP_MODULE__", app_module)
 }
 
 fn generate_main_rs(
     config: &RustSlintAdapterConfig,
     has_windows_subsystem: bool,
     has_linux_desktop: bool,
+    has_video: bool,
 ) -> String {
     let win_attr = if has_windows_subsystem {
         "#![cfg_attr(target_os = \"windows\", windows_subsystem = \"windows\")]\n"
@@ -578,6 +781,32 @@ fn generate_main_rs(
     } else {
         ""
     };
+    if has_video {
+        return format!(
+            r#"{win_attr}pub mod app;
+slint::include_modules!();
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    let ui = MainWindow::new()?;
+    let source = std::env::var_os("MAE_VIDEO_PATH").map(std::path::PathBuf::from);
+    if let Some(source) = &source {{
+        let cache = std::env::var_os("MAE_VIDEO_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("mae-video-cache"));
+        let paths = app::media::extract_video_frames(source, &cache)?;
+        let images = app::media::load_video_images(&paths)?;
+        ui.set_video_frames(std::rc::Rc::new(slint::VecModel::from(images)).into());
+    }}
+    ui.on_launch_external_player(move || {{
+        if let Some(source) = &source {{ let _ = app::media::open_external_player(source); }}
+    }});
+    ui.run()?;
+    Ok(())
+}}
+"#,
+            win_attr = win_attr
+        );
+    }
     format!(
         r#"{win_attr}pub mod app;
 
@@ -689,6 +918,30 @@ fn cached_frames(cache: &Path) -> io::Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     frames.sort();
     Ok(frames)
+}
+
+/// Decodes cached PNG frames into the `[image]` values accepted by VideoAttachment.
+#[cfg(feature = "inline-video")]
+pub fn load_video_images(paths: &[PathBuf]) -> io::Result<Vec<slint::Image>> {
+    paths.iter().map(|path| {
+        let decoded = image::open(path).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?.into_rgba8();
+        let (width, height) = decoded.dimensions();
+        let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(decoded.as_raw(), width, height);
+        Ok(slint::Image::from_rgba8(pixels))
+    }).collect()
+}
+
+#[cfg(all(test, feature = "inline-video"))]
+mod tests {
+    use super::load_video_images;
+    #[test]
+    fn decodes_cached_png_into_a_slint_image() {
+        let path = std::env::temp_dir().join(format!("mae-frame-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([12, 34, 56, 255])).save(&path).unwrap();
+        let frames = load_video_images(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(frames.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 /// Opens the original video in the platform's registered media player.
@@ -1123,7 +1376,10 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
 
     let mut token_props = String::new();
     for token in &model.style_tokens {
-        let name = sanitize_identifier(&token.name).replace('_', "-");
+        let name = sanitize_identifier(&token.name)
+            .replace('_', "-")
+            .trim_matches('-')
+            .to_string();
         token_props.push_str(&format!(
             "    out property <string> {name}: \"{}\";\n",
             token.value
@@ -1139,6 +1395,13 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
     out property <float> scale-factor: {scale_factor:.2};
     out property <bool> responsive-wrap: {responsive_wrap};
     out property <length> max-content-width: {max_width}px;
+    in-out property <length> control-radius: 12px;
+    in-out property <length> control-height: 40px;
+    in-out property <color> primary-color: #2563eb;
+    in-out property <color> on-primary-color: #ffffff;
+    in-out property <color> surface-color: #ffffff;
+    in-out property <color> text-color: #111827;
+    in-out property <color> border-color: #94a3b8;
 {token_props}}}
 "#
     )
@@ -1162,7 +1425,11 @@ export component {comp_name} inherits Rectangle {{
         running: root.frames.length > 1;
         triggered() => {{
             if root.frames.length > 0 {{
-                root.frame-index = (root.frame-index + 1) % root.frames.length;
+                if root.frame-index + 1 < root.frames.length {{
+                    root.frame-index = root.frame-index + 1;
+                }} else {{
+                    root.frame-index = 0;
+                }}
             }}
         }}
     }}
@@ -1424,6 +1691,10 @@ export component {comp_name} inherits Rectangle {{
 fn generate_app_slint(config: &RustSlintAdapterConfig, model: &SemanticUiModel) -> String {
     let mut imports = String::from("import { ThemeTokens } from \"theme/tokens.slint\";\n");
     let mut child_instances = String::new();
+    let has_video = model
+        .components
+        .iter()
+        .any(|component| component.name.to_ascii_lowercase().contains("video"));
 
     for comp in &model.components {
         if comp.name.eq_ignore_ascii_case("App") {
@@ -1435,9 +1706,20 @@ fn generate_app_slint(config: &RustSlintAdapterConfig, model: &SemanticUiModel) 
             format!("import {{ {comp_ident} }} from \"components/{file_stem}.slint\";\n");
         if !imports.contains(&import_line) {
             imports.push_str(&import_line);
-            child_instances.push_str(&format!("            {comp_ident} {{}}\n"));
+            if comp.name.to_ascii_lowercase().contains("video") {
+                child_instances.push_str(&format!(
+                    "            {comp_ident} {{ width: parent.width; height: 240px; frames: root.video-frames; launch-external-player => {{ root.launch-external-player(); }} }}\n"
+                ));
+            } else {
+                child_instances.push_str(&format!("            {comp_ident} {{}}\n"));
+            }
         }
     }
+    let video_bindings = if has_video {
+        "    in property <[image]> video-frames;\n    callback launch-external-player();\n"
+    } else {
+        ""
+    };
 
     let mut state_props = String::new();
     for field in &model.state_fields {
@@ -1472,6 +1754,7 @@ export component MainWindow inherits Window {{
     in-out property <string> theme-mode: "dark-slate";
     in-out property <string> time-range: "30d";
     in-out property <string> task-priority: "high";
+{video_bindings}
 {state_props}
     callback navigate(string);
     callback submit-item(string);
@@ -1505,6 +1788,7 @@ export component MainWindow inherits Window {{
         height = config.window_height,
         state_props = state_props,
         callbacks = callbacks,
+        video_bindings = video_bindings,
         child_instances = child_instances
     )
 }

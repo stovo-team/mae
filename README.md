@@ -55,3 +55,13 @@ opf check .
 okf-agent bundle index --root .okf --index-root .okf-index
 okf-agent bundle validate --root .okf --index-root .okf-index
 ```
+
+### Route-level visual verification
+
+```bash
+cargo run -p mae-cli -- verify --visual target/mvp fixtures/react-rust-slint/source
+```
+
+Visual mode starts the source project's `mock` script (or `dev` if `mock` is absent), waits for its local HTTP endpoint, and captures each route listed in `runtime-baseline.json` with headless Chromium. It then builds and launches the generated modular Slint desktop target with the `headless-test` feature, sets the matching route, and captures the native window through Slint's software renderer. The source PNGs and native PPMs are compared with ImageMagick; more than 2% differing pixels fails verification. The target must contain exactly one `crates/*-desktop-app` crate. Set `MAE_SOURCE_URL` or `MAE_CHROMIUM` to override the default server URL or Chromium executable.
+
+The visual gate requires Cargo, npm and the source project's `mock` or `dev` script, headless Chromium, and ImageMagick (`identify` and `compare`). Captures are written under `target/mvp/.mae-visual/{source,native}/` for inspection.
