@@ -4,6 +4,8 @@
 //! `mae-adapter-rust-slint`, and `mae-verification` into the complete
 //! React -> Native Desktop (Windows & Ubuntu/Linux) Rust + Slint frontend migration engine.
 
+mod visual_capture;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -490,7 +492,22 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
             ))
         }
         "verify" => {
-            let target_dir = PathBuf::from(pos.get(2).map(String::as_str).unwrap_or("target/mvp"));
+            let visual = pos.iter().any(|arg| arg == "--visual");
+            let source_option = pos
+                .iter()
+                .position(|arg| arg == "--source")
+                .and_then(|idx| pos.get(idx + 1));
+            let visual_positional_target = if pos.get(2).map(String::as_str) == Some("--visual") {
+                pos.get(3).filter(|arg| arg.as_str() != "--source")
+            } else {
+                pos.get(2)
+            };
+            let target_arg = if visual {
+                visual_positional_target
+            } else {
+                pos.get(2)
+            };
+            let target_dir = PathBuf::from(target_arg.map(String::as_str).unwrap_or("target/mvp"));
             let native = NativeComplianceVerifier::for_platform(&target_dir, platform);
             let (status, violations) = native.inspect_target()?;
             if !status.is_pass() {
@@ -499,11 +516,14 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
                     platform, violations.len(), violations.join("\n")
                 )));
             }
-            if pos.iter().any(|arg| arg == "--visual") {
-                let source_pos = pos.iter().position(|arg| arg == "--source").and_then(|idx| pos.get(idx + 1));
-                let source_dir = source_pos.map(PathBuf::from).ok_or_else(|| DomainError::PortError(
-                    "`mae verify --visual` requires `--source <react-source-dir>`".to_string(),
-                ))?;
+            if visual {
+                let source_dir = PathBuf::from(source_option.or_else(|| {
+                    if pos.get(2).map(String::as_str) == Some("--visual") {
+                        pos.get(4)
+                    } else {
+                        pos.get(3)
+                    }
+                }).map(String::as_str).unwrap_or("fixtures/react-rust-slint/source"));
                 let (model, _, _) = analyze_react_fixture_for_platform(&source_dir, platform)?;
                 let layout = model.layout_constraints.first();
                 let token = model.style_tokens.iter().find(|t| {
@@ -536,7 +556,8 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
                 if !evidence.status.is_pass() {
                     return Err(DomainError::PortError(format!("MAE Visual Verify Failed: {}", evidence.summary)));
                 }
-                return Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, static_visual_status=PASS (source and generated declarations; no screenshot capture)", platform));
+                let live_summary = visual_capture::verify_live_source(&source_dir, &target_dir)?;
+                return Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, static_visual_status=PASS, {}", platform, live_summary));
             }
             Ok(format!("MAE Verify Complete: platform={}, native_status=PASS, violations=0", platform))
         }
@@ -652,7 +673,7 @@ pub fn execute_cli_args(args: &[String]) -> Result<String, DomainError> {
             run_cli_pilot_pipeline(&repo_root, py_file, target_out)
         }
         _ => Ok(
-            "MAE v0.1 CLI — Commands: analyze [--platform windows|ubuntu|cross-platform] <src> | plan [--platform ...] <src> | migrate [--platform ...] <root> <src> <out> | verify [--platform ...] <out> | run-e2e [--platform ...] <root> <src> <out> | analyze-cli <py_file> | migrate-cli <py_file> <target_out> | pilot-cli <root> <py_file> <target_out>"
+            "MAE v0.1 CLI — Commands: analyze [--platform windows|ubuntu|cross-platform] <src> | plan [--platform ...] <src> | migrate [--platform ...] <root> <src> <out> | verify [--visual] [--platform ...] <out> [source_dir] | run-e2e [--platform ...] <root> <src> <out> | analyze-cli <py_file> | migrate-cli <py_file> <target_out> | pilot-cli <root> <py_file> <target_out>"
                 .to_string(),
         ),
     }
