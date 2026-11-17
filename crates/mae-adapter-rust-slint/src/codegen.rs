@@ -344,7 +344,7 @@ fn scaffold_modular_monolith(
                 "\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n"
             ));
         } else if is_binary {
-            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = []\nheadless-test = []\n"));
+            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\nslint = {{ version = \"=1.18.1\", default-features = false, features = [\"std\", \"compat-1-18\"] }}\ni-slint-backend-testing = {{ version = \"=1.18.1\", optional = true }}\n\n[build-dependencies]\nslint-build = \"=1.18.1\"\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = [\"slint/backend-default\", \"slint/renderer-femtovg\"]\nheadless-test = [\"slint/system-testing\", \"slint/renderer-software\", \"dep:i-slint-backend-testing\"]\n"));
         }
         write_file(root, &format!("{path}/Cargo.toml"), &cargo, &mut generated)?;
         if is_binary {
@@ -357,9 +357,14 @@ fn scaffold_modular_monolith(
                 root,
                 &format!("{path}/src/main.rs"),
                 &format!(
-                    "{attr}fn main() {{ let path = std::env::var_os(\"MAE_CONFIG\").unwrap_or_else(|| \"appearance.toml\".into()); let settings = std::fs::read_to_string(path).ok().and_then(|source| {app_module}_config::AppearanceSettings::from_toml(&source).ok()).unwrap_or_default(); println!(\"{}: {{}}\", settings.brand); }}\n",
-                    config.window_title
+                    "{attr}slint::include_modules!();\nfn main() -> Result<(), Box<dyn std::error::Error>> {{ let path = std::env::var_os(\"MAE_CONFIG\").unwrap_or_else(|| \"appearance.toml\".into()); let settings = std::fs::read_to_string(path).ok().and_then(|source| {app_module}_config::AppearanceSettings::from_toml(&source).ok()).unwrap_or_default(); let ui = MainWindow::new()?; ui.set_brand(settings.brand.into()); ui.run()?; Ok(()) }}\n#[cfg(all(test, feature = \"headless-test\"))]\nmod tests {{\n    use super::MainWindow;\n    #[test]\n    fn constructs_window_with_headless_backend() {{\n        i_slint_backend_testing::init_no_event_loop();\n        let ui = MainWindow::new().unwrap();\n        assert!(!ui.get_brand().is_empty());\n    }}\n}}\n",
                 ),
+                &mut generated,
+            )?;
+            write_file(
+                root,
+                &format!("{path}/build.rs"),
+                "fn main() { slint_build::compile(\"ui/app.slint\").expect(\"compile modular Slint UI\"); }\n",
                 &mut generated,
             )?;
         } else {
@@ -440,9 +445,71 @@ mod tests {
     }
 }
 "##,
-                "shared-utils" => "pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(\" \") }\n",
+                "shared-utils" => r#"pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(" ") }
+
+pub fn strip_markdown(value: &str) -> String {
+    value.chars().filter(|ch| !matches!(ch, '*' | '_' | '`' | '#')).collect()
+}
+
+pub fn is_safe_link(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("https://") || value.starts_with("http://") || value.starts_with("mailto:")
+}
+
+pub fn shortcut_label(keys: &[&str]) -> String { keys.join("+") }
+
+#[cfg(test)]
+mod tests {
+    use super::{is_safe_link, normalize_whitespace, shortcut_label, strip_markdown};
+    #[test]
+    fn shared_text_helpers_are_deterministic() {
+        assert_eq!(normalize_whitespace("  hello   world "), "hello world");
+        assert_eq!(strip_markdown("**hello**"), "hello");
+        assert!(is_safe_link("https://example.com"));
+        assert!(!is_safe_link("javascript:alert(1)"));
+        assert_eq!(shortcut_label(&["Ctrl", "K"]), "Ctrl+K");
+    }
+}
+"#,
                 "domain" => "pub trait LocalReplicaRepositoryPort { fn load(&self, key: &str) -> Option<String>; }\n",
-                "application" => "#[derive(Default)]\npub struct AppState { pub current_route: String }\n",
+                "application" => r#"#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEvent { Navigate(String), Search(String), AddTask(String), LoadFinished }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppState { pub current_route: String, pub search: String, pub tasks: Vec<String>, pub loading: bool }
+
+impl Default for AppState {
+    fn default() -> Self { Self { current_route: "/".into(), search: String::new(), tasks: Vec::new(), loading: true } }
+}
+
+pub fn reduce(state: &mut AppState, event: AppEvent) {
+    match event {
+        AppEvent::Navigate(route) => state.current_route = route,
+        AppEvent::Search(value) => state.search = value,
+        AppEvent::AddTask(task) => state.tasks.push(task),
+        AppEvent::LoadFinished => state.loading = false,
+    }
+}
+
+pub fn seed_mock_workspace() -> AppState {
+    AppState { current_route: "/".into(), search: String::new(), tasks: vec!["Review migration".into(), "Verify native UI".into()], loading: false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reduce, seed_mock_workspace, AppEvent, AppState};
+    #[test]
+    fn reducer_and_seed_are_deterministic() {
+        let mut state = seed_mock_workspace();
+        reduce(&mut state, AppEvent::Navigate("/settings".into()));
+        reduce(&mut state, AppEvent::Search("design".into()));
+        assert_eq!(state.current_route, "/settings");
+        assert_eq!(state.search, "design");
+        assert_eq!(state.tasks.len(), 2);
+        assert_eq!(AppState::default().current_route, "/");
+    }
+}
+"#,
                 "adapter-platform" => "pub fn is_mobile_capacitor_plugin_enabled(_: &str) -> bool { false }\n",
                 _ => "// Adapter implementation seam.\n",
             };
@@ -457,8 +524,13 @@ mod tests {
         &mut generated,
     )?;
     write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\ncontrol_radius_px = 12\nspacing_px = 8\nicon_size_px = 20\nfont_size_px = 14\nmotion_scale = 1\nmotion_duration_ms = 180\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nsurface_color = \"#ffffff\"\nstrings_locale = \"en\"\napp_title_en = \"Workspace\"\napp_title_ru = \"Рабочее пространство\"\nchat_empty_en = \"No messages\"\nchat_empty_ru = \"Нет сообщений\"\n", &mut generated)?;
-    write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "export component PopupButton inherits Rectangle {}\nexport component PopupField inherits Rectangle {}\n", &mut generated)?;
-    write_file(root, &format!("{desktop}/ui/app.slint"), &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nexport component MainWindow inherits Window {{ title: \"{}\"; }}\n", config.window_title), &mut generated)?;
+    write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "import { ThemeTokens } from \"../../theme/tokens.slint\";\nexport component PopupButton inherits Rectangle {\n    in property <string> text;\n    callback clicked;\n    height: ThemeTokens.control-height;\n    border-radius: ThemeTokens.control-radius;\n    background: ThemeTokens.primary-color;\n    Text { text: root.text; color: ThemeTokens.on-primary-color; vertical-alignment: center; horizontal-alignment: center; }\n    TouchArea { clicked => { root.clicked(); } }\n}\nexport component PopupField inherits Rectangle {\n    in-out property <string> text;\n    in property <string> placeholder;\n    height: ThemeTokens.control-height;\n    border-radius: ThemeTokens.control-radius;\n    border-width: 1px;\n    border-color: ThemeTokens.border-color;\n    TextInput { text <=> root.text; }\n    if root.text == \"\" : Text { text: root.placeholder; color: ThemeTokens.text-color; }\n}\n", &mut generated)?;
+    write_file(
+        root,
+        &format!("{desktop}/ui/app.slint"),
+        &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nimport {{ PopupButton, PopupField }} from \"components/ui/popup_primitives.slint\";\nexport component MainWindow inherits Window {{\n    in-out property <string> brand: \"{}\";\n    title: root.brand;\n    min-width: 640px;\n    min-height: 480px;\n    preferred-width: {}px;\n    preferred-height: {}px;\n    Rectangle {{\n        border-radius: ThemeTokens.border-radius;\n        background: ThemeTokens.surface-color;\n        VerticalLayout {{ spacing: ThemeTokens.spacing; padding: ThemeTokens.padding;\n            Text {{ text: root.brand; color: ThemeTokens.text-color; font-size: ThemeTokens.font-size; }}\n            PopupField {{ text: \"\"; placeholder: \"Search\"; }}\n            PopupButton {{ text: \"Continue\"; }}\n        }}\n    }}\n}}\n", config.window_title, config.window_width, config.window_height),
+        &mut generated,
+    )?;
     write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
     write_file(
         root,
@@ -1144,7 +1216,10 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
 
     let mut token_props = String::new();
     for token in &model.style_tokens {
-        let name = sanitize_identifier(&token.name).replace('_', "-");
+        let name = sanitize_identifier(&token.name)
+            .replace('_', "-")
+            .trim_matches('-')
+            .to_string();
         token_props.push_str(&format!(
             "    out property <string> {name}: \"{}\";\n",
             token.value
@@ -1160,6 +1235,13 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
     out property <float> scale-factor: {scale_factor:.2};
     out property <bool> responsive-wrap: {responsive_wrap};
     out property <length> max-content-width: {max_width}px;
+    in-out property <length> control-radius: 12px;
+    in-out property <length> control-height: 40px;
+    in-out property <color> primary-color: #2563eb;
+    in-out property <color> on-primary-color: #ffffff;
+    in-out property <color> surface-color: #ffffff;
+    in-out property <color> text-color: #111827;
+    in-out property <color> border-color: #94a3b8;
 {token_props}}}
 "#
     )
