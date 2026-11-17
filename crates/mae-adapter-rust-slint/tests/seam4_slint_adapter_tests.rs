@@ -106,6 +106,115 @@ fn scaffold_target_generates_canonical_windows_rust_slint_layout() {
 }
 
 #[test]
+fn scaffold_generates_exact_avatar_radius_and_bottom_pinned_chat_stream() {
+    let target_dir = unique_temp_dir("chat_primitives");
+    let mut model = sample_windows_semantic_model();
+    model
+        .components
+        .push(ComponentNode::new("Avatar", "Avatar", "src/Avatar.tsx"));
+    model.components.push(ComponentNode::new(
+        "ChatMessageList",
+        "ChatMessageList",
+        "src/ChatMessageList.tsx",
+    ));
+    model.components.push(ComponentNode::new(
+        "VideoAttachment",
+        "VideoAttachment",
+        "src/VideoAttachment.tsx",
+    ));
+    RustSlintTargetAdapter::default()
+        .scaffold_target(&model, target_dir.to_str().unwrap())
+        .expect("scaffold target");
+
+    let avatar = fs::read_to_string(target_dir.join("ui/components/avatar.slint")).unwrap();
+    assert!(avatar.contains("border-radius: self.height / 2;"));
+    let chat = fs::read_to_string(target_dir.join("ui/components/chatmessagelist.slint")).unwrap();
+    assert!(chat.contains("Flickable {"));
+    assert!(chat.contains("changed content-height => { self.content-y = min(0px, self.height - self.content-height); }"));
+    let video = fs::read_to_string(target_dir.join("ui/components/videoattachment.slint")).unwrap();
+    assert!(video.contains("interval: 33ms;"));
+    assert!(video.contains("in property <[image]> frames;"));
+    assert!(video.contains("root.frames[root.frame-index]"));
+    assert!(!video.contains("callback frame-requested(int);"));
+    assert!(video.contains("callback launch-external-player();"));
+    let media = fs::read_to_string(target_dir.join("src/app/media.rs")).unwrap();
+    assert!(media.contains("pub fn extract_video_frames"));
+    assert!(media.contains("fps=30"));
+    assert!(media.contains("pub fn open_external_player"));
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--no-run"])
+        .current_dir(&target_dir)
+        .output()
+        .expect("compile generated video target");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(&target_dir);
+}
+
+#[test]
+fn modular_monolith_topology_scaffolds_a_testable_cargo_workspace() {
+    let target_dir = unique_temp_dir("modular_monolith");
+    let adapter = RustSlintTargetAdapter::default()
+        .with_topology(mae_adapter_rust_slint::WorkspaceTopology::ModularMonolith);
+    adapter
+        .scaffold_target(
+            &sample_windows_semantic_model(),
+            target_dir.to_str().unwrap(),
+        )
+        .unwrap();
+    let appearance = fs::read_to_string(target_dir.join("appearance.toml")).unwrap();
+    assert!(appearance.contains("bubble_radius_px = 16"));
+    assert!(appearance.contains("primary_color = \"#2563eb\""));
+    let generated_main =
+        fs::read_to_string(target_dir.join("crates/migrated-slint-desktop-app/src/main.rs"))
+            .unwrap();
+    assert!(generated_main.contains("MAE_CONFIG"));
+    assert!(generated_main.contains("AppearanceSettings::from_toml"));
+    let clean_lint = std::process::Command::new("bash")
+        .arg("scripts/check-slint-tokens.sh")
+        .current_dir(&target_dir)
+        .output()
+        .expect("run generated Slint token linter");
+    assert!(
+        clean_lint.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean_lint.stderr)
+    );
+    let violation =
+        target_dir.join("crates/migrated-slint-desktop-app/ui/components/ui/pill.slint");
+    fs::write(
+        &violation,
+        "export component Pill inherits Rectangle { border-radius: 999px; }\n",
+    )
+    .unwrap();
+    let bad_lint = std::process::Command::new("bash")
+        .arg("scripts/check-slint-tokens.sh")
+        .current_dir(&target_dir)
+        .output()
+        .expect("run linter with forbidden pill radius");
+    assert!(
+        !bad_lint.status.success(),
+        "the token linter accepted a hard-coded pill radius"
+    );
+    fs::remove_file(violation).unwrap();
+
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--workspace"])
+        .current_dir(&target_dir)
+        .output()
+        .expect("run generated workspace tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(&target_dir);
+}
+
+#[test]
 fn scaffold_target_enforces_windows_gui_subsystem_attribute_in_main_rs() {
     let target_dir = unique_temp_dir("win_subsys");
     let model = sample_windows_semantic_model();

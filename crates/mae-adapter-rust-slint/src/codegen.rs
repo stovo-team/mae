@@ -13,6 +13,14 @@ pub struct RustSlintAdapterConfig {
     pub window_title: String,
     pub window_width: u32,
     pub window_height: u32,
+    pub topology: WorkspaceTopology,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceTopology {
+    #[default]
+    SingleCrate,
+    ModularMonolith,
 }
 
 impl Default for RustSlintAdapterConfig {
@@ -22,6 +30,7 @@ impl Default for RustSlintAdapterConfig {
             window_title: "MAE Native Slint Application".to_string(),
             window_width: 1280,
             window_height: 800,
+            topology: WorkspaceTopology::SingleCrate,
         }
     }
 }
@@ -45,6 +54,11 @@ impl RustSlintTargetAdapter {
                 ..RustSlintAdapterConfig::default()
             },
         }
+    }
+
+    pub fn with_topology(mut self, topology: WorkspaceTopology) -> Self {
+        self.config.topology = topology;
+        self
     }
 
     /// Reads the current target `ArtifactRevision` persisted in `target_dir/.mae-target-revision`.
@@ -72,6 +86,9 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         target_dir: &str,
     ) -> Result<TargetScaffoldSummary, DomainError> {
         let root = PathBuf::from(target_dir);
+        if self.config.topology == WorkspaceTopology::ModularMonolith {
+            return scaffold_modular_monolith(&self.config, model, &root);
+        }
         fs::create_dir_all(root.join("src/app"))
             .map_err(|e| DomainError::PortError(format!("Failed to create src/app: {e}")))?;
         fs::create_dir_all(root.join("ui/components"))
@@ -106,12 +123,24 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         write_file(&root, "src/lib.rs", &lib_rs, &mut files_generated)?;
 
         // 5. src/app/{mod,api_client,state,events,reducer,effects,navigation}.rs
+        let has_video = model
+            .components
+            .iter()
+            .any(|component| component.name.to_ascii_lowercase().contains("video"));
         write_file(
             &root,
             "src/app/mod.rs",
-            &generate_app_mod_rs(),
+            &generate_app_mod_rs(has_video),
             &mut files_generated,
         )?;
+        if has_video {
+            write_file(
+                &root,
+                "src/app/media.rs",
+                &generate_media_rs(),
+                &mut files_generated,
+            )?;
+        }
         write_file(
             &root,
             "src/app/api_client.rs",
@@ -261,6 +290,178 @@ impl TargetAdapterPort for RustSlintTargetAdapter {
         Self::write_target_revision(&root, next_rev)?;
         Ok(next_rev)
     }
+}
+
+fn scaffold_modular_monolith(
+    config: &RustSlintAdapterConfig,
+    model: &SemanticUiModel,
+    root: &Path,
+) -> Result<TargetScaffoldSummary, DomainError> {
+    let configured_name = sanitize_crate_name(&config.crate_name);
+    let app = configured_name
+        .strip_suffix("-desktop-app")
+        .unwrap_or(&configured_name)
+        .to_string();
+    let app_module = app.replace('-', "_");
+    let members = [
+        "config",
+        "shared-utils",
+        "domain",
+        "application",
+        "adapter-storage",
+        "adapter-network",
+        "adapter-crypto",
+        "adapter-media",
+        "adapter-platform",
+        "desktop-app",
+    ];
+    let mut generated = Vec::new();
+    fs::create_dir_all(root.join("crates")).map_err(|e| DomainError::PortError(e.to_string()))?;
+    write_file(
+        root,
+        "Cargo.toml",
+        &format!(
+            "[workspace]\nresolver = \"2\"\nmembers = [{}]\n",
+            members
+                .iter()
+                .map(|name| format!("\"crates/{app}-{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        &mut generated,
+    )?;
+    for member in members {
+        let crate_name = format!("{app}-{member}");
+        let is_binary = member == "desktop-app";
+        let path = format!("crates/{crate_name}");
+        let mut cargo = format!(
+            "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+        );
+        if member == "application" {
+            cargo.push_str(&format!("\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\n"));
+        } else if member.starts_with("adapter-") {
+            cargo.push_str(&format!(
+                "\n[dependencies]\n{app}-domain = {{ path = \"../{app}-domain\" }}\n"
+            ));
+        } else if is_binary {
+            cargo.push_str(&format!("\n[dependencies]\n{app}-application = {{ path = \"../{app}-application\" }}\n{app}-config = {{ path = \"../{app}-config\" }}\n\n[features]\ndefault = [\"desktop-gpu\"]\ndesktop-gpu = []\nheadless-test = []\n"));
+        }
+        write_file(root, &format!("{path}/Cargo.toml"), &cargo, &mut generated)?;
+        if is_binary {
+            let attr = if model.platform.requires_windows_subsystem() {
+                "#![cfg_attr(target_os = \"windows\", windows_subsystem = \"windows\")]\n"
+            } else {
+                ""
+            };
+            write_file(
+                root,
+                &format!("{path}/src/main.rs"),
+                &format!(
+                    "{attr}fn main() {{ let path = std::env::var_os(\"MAE_CONFIG\").unwrap_or_else(|| \"appearance.toml\".into()); let settings = std::fs::read_to_string(path).ok().and_then(|source| {app_module}_config::AppearanceSettings::from_toml(&source).ok()).unwrap_or_default(); println!(\"{}: {{}}\", settings.brand); }}\n",
+                    config.window_title
+                ),
+                &mut generated,
+            )?;
+        } else {
+            let body = match member {
+                "config" => r##"#[derive(Debug, Clone, PartialEq)]
+pub struct AppearanceSettings {
+    pub brand: String,
+    pub theme_mode: String,
+    pub bubble_radius_px: f32,
+    pub spacing_px: f32,
+    pub motion_scale: f32,
+    pub primary_color: String,
+    pub secondary_color: String,
+    pub strings_locale: String,
+}
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self { brand: "MAE".into(), theme_mode: "system".into(), bubble_radius_px: 16.0,
+            spacing_px: 8.0, motion_scale: 1.0, primary_color: "#2563eb".into(),
+            secondary_color: "#64748b".into(), strings_locale: "en".into() }
+    }
+}
+impl AppearanceSettings {
+    /// Parses the supported TOML key/value overrides; unknown keys are ignored.
+    pub fn from_toml(source: &str) -> Result<Self, String> {
+        let mut settings = Self::default();
+        for (index, line) in source.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') { continue; }
+            let Some((key, value)) = line.split_once('=') else { return Err(format!("invalid setting on line {}", index + 1)); };
+            let key = key.trim();
+            let value = value.trim();
+            let string = || value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).map(str::to_owned)
+                .ok_or_else(|| format!("{key} must be a quoted string"));
+            let number = || value.parse::<f32>().map_err(|_| format!("{key} must be a number"));
+            match key {
+                "brand" => settings.brand = string()?, "theme_mode" => settings.theme_mode = string()?,
+                "bubble_radius_px" => settings.bubble_radius_px = number()?, "spacing_px" => settings.spacing_px = number()?,
+                "motion_scale" => settings.motion_scale = number()?, "primary_color" => settings.primary_color = string()?,
+                "secondary_color" => settings.secondary_color = string()?, "strings_locale" => settings.strings_locale = string()?,
+                _ => {}
+            }
+        }
+        Ok(settings)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::AppearanceSettings;
+    #[test]
+    fn applies_toml_overrides_and_preserves_defaults() {
+        let settings = AppearanceSettings::from_toml("brand = \"Stovo\"\nbubble_radius_px = 20\nprimary_color = \"#123456\"\n").unwrap();
+        assert_eq!(settings.brand, "Stovo");
+        assert_eq!(settings.bubble_radius_px, 20.0);
+        assert_eq!(settings.primary_color, "#123456");
+        assert_eq!(settings.motion_scale, 1.0);
+    }
+}
+"##,
+                "shared-utils" => "pub fn normalize_whitespace(value: &str) -> String { value.split_whitespace().collect::<Vec<_>>().join(\" \") }\n",
+                "domain" => "pub trait LocalReplicaRepositoryPort { fn load(&self, key: &str) -> Option<String>; }\n",
+                "application" => "#[derive(Default)]\npub struct AppState { pub current_route: String }\n",
+                "adapter-platform" => "pub fn is_mobile_capacitor_plugin_enabled(_: &str) -> bool { false }\n",
+                _ => "// Adapter implementation seam.\n",
+            };
+            write_file(root, &format!("{path}/src/lib.rs"), body, &mut generated)?;
+        }
+    }
+    let desktop = format!("crates/{app}-desktop-app");
+    write_file(
+        root,
+        &format!("{desktop}/ui/theme/tokens.slint"),
+        &generate_theme_tokens_slint(model),
+        &mut generated,
+    )?;
+    write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\nspacing_px = 8\nmotion_scale = 1\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nstrings_locale = \"en\"\n", &mut generated)?;
+    write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "export component PopupButton inherits Rectangle {}\nexport component PopupField inherits Rectangle {}\n", &mut generated)?;
+    write_file(root, &format!("{desktop}/ui/app.slint"), &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nexport component MainWindow inherits Window {{ title: \"{}\"; }}\n", config.window_title), &mut generated)?;
+    write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
+    write_file(
+        root,
+        "scripts/check-slint-tokens.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+violations=0
+while IFS= read -r -d '' file; do
+    if grep -nE '#[0-9a-fA-F]{3,8}|border-radius:[[:space:]]*([0-9]+px|50%)|font-size:[[:space:]]*[0-9]+px' "$file"; then
+        violations=1
+    fi
+done < <(find "$root/crates" -type f -name '*.slint' \( -path '*-desktop-app/ui/pages/*' -o -path '*-desktop-app/ui/components/*' \) -print0)
+exit "$violations"
+"#,
+        &mut generated,
+    )?;
+    let revision = RustSlintTargetAdapter::read_target_revision(root);
+    RustSlintTargetAdapter::write_target_revision(root, revision)?;
+    Ok(TargetScaffoldSummary {
+        files_generated: generated,
+        target_crate_name: format!("{app}-desktop-app"),
+        has_windows_subsystem: model.platform.requires_windows_subsystem(),
+    })
 }
 
 fn write_file(
@@ -447,15 +648,62 @@ fn generate_lib_rs(has_windows_subsystem: bool) -> String {
     format!("{win_attr}pub mod app;\n")
 }
 
-fn generate_app_mod_rs() -> String {
-    r#"pub mod api_client;
-pub mod effects;
-pub mod events;
-pub mod navigation;
-pub mod reducer;
-pub mod state;
-"#
-    .to_string()
+fn generate_app_mod_rs(has_video: bool) -> String {
+    format!(
+        "pub mod api_client;\npub mod effects;\npub mod events;\npub mod navigation;\npub mod reducer;\npub mod state;\n{}",
+        if has_video { "pub mod media;\n" } else { "" }
+    )
+}
+
+fn generate_media_rs() -> String {
+    r#"use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::UNIX_EPOCH;
+
+/// Extracts 30 fps PNG frames through FFmpeg and reuses a cache keyed by source size and mtime.
+pub fn extract_video_frames(source: &Path, cache_root: &Path) -> io::Result<Vec<PathBuf>> {
+    let metadata = fs::metadata(source)?;
+    let modified = metadata.modified()?.duration_since(UNIX_EPOCH)
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?.as_secs();
+    let name = source.file_stem().and_then(|value| value.to_str()).unwrap_or("video");
+    let cache = cache_root.join(format!("{name}-{}-{modified}", metadata.len()));
+    fs::create_dir_all(&cache)?;
+    let mut frames = cached_frames(&cache)?;
+    if !frames.is_empty() { return Ok(frames); }
+    let pattern = cache.join("frame-%06d.png");
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(source).args(["-vf", "fps=30", "-vsync", "0", "-start_number", "0"])
+        .arg(pattern).status()?;
+    if !status.success() { return Err(io::Error::new(io::ErrorKind::Other, "ffmpeg frame extraction failed")); }
+    frames = cached_frames(&cache)?;
+    if frames.is_empty() { return Err(io::Error::new(io::ErrorKind::Other, "ffmpeg produced no video frames")); }
+    Ok(frames)
+}
+
+fn cached_frames(cache: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut frames = fs::read_dir(cache)?.flatten().map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
+        .collect::<Vec<_>>();
+    frames.sort();
+    Ok(frames)
+}
+
+/// Opens the original video in the platform's registered media player.
+pub fn open_external_player(source: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd").args(["/C", "start", ""]).arg(source).status()?;
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").arg(source).status()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open").arg(source).status()?;
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err(io::Error::new(io::ErrorKind::Unsupported, "no external media player launcher for this platform"));
+    if status.success() { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "external media player failed to launch")) }
+}
+"#.to_string()
 }
 
 fn generate_api_client_rs(model: &SemanticUiModel) -> String {
@@ -898,6 +1146,44 @@ fn generate_theme_tokens_slint(model: &SemanticUiModel) -> String {
 
 fn generate_component_slint(comp: &ComponentNode) -> String {
     let comp_name = pascal_case(&sanitize_identifier(&comp.name));
+    let component_kind = comp.name.to_ascii_lowercase();
+    if component_kind.contains("video") {
+        return format!(
+            r#"import {{ ThemeTokens }} from "../theme/tokens.slint";
+
+export component {comp_name} inherits Rectangle {{
+    in property <[image]> frames;
+    in-out property <int> frame-index: 0;
+    callback launch-external-player();
+    border-radius: ThemeTokens.border-radius;
+
+    Timer {{
+        interval: 33ms;
+        running: root.frames.length > 1;
+        triggered() => {{
+            if root.frames.length > 0 {{
+                root.frame-index = (root.frame-index + 1) % root.frames.length;
+            }}
+        }}
+    }}
+    Image {{
+        source: root.frames.length > 0 ? root.frames[root.frame-index] : @image-url("");
+        width: parent.width;
+        height: parent.height;
+    }}
+    TouchArea {{ clicked() => {{ root.launch-external-player(); }} }}
+}}
+"#,
+            comp_name = comp_name,
+        );
+    }
+    let circular = component_kind.contains("avatar")
+        || component_kind.contains("circle")
+        || component_kind.contains("iconbutton")
+        || component_kind.contains("icon-button");
+    let chat_stream = component_kind.contains("chat")
+        || component_kind.contains("message-list")
+        || component_kind.contains("messagelist");
     let mut props = String::new();
     for p in &comp.props {
         let prop_ident = sanitize_identifier(&p.name).replace('_', "-");
@@ -1098,6 +1384,17 @@ fn generate_component_slint(comp: &ComponentNode) -> String {
         element_nodes.push_str(&snippet);
     }
 
+    let radius_binding = if circular {
+        "self.height / 2"
+    } else {
+        "ThemeTokens.border-radius"
+    };
+    let (layout_open, layout_close) = if chat_stream {
+        ("    Flickable {\n        width: parent.width;\n        height: parent.height;\n        changed content-height => { self.content-y = min(0px, self.height - self.content-height); }\n        VerticalLayout {\n",
+         "        }\n    }\n")
+    } else {
+        ("    VerticalLayout {\n", "    }\n")
+    };
     format!(
         r#"import {{ ThemeTokens }} from "../theme/tokens.slint";
 
@@ -1105,9 +1402,9 @@ export component {comp_name} inherits Rectangle {{
 {props}    callback action-triggered(string);
     callback complete-all-triggered();
     callback tab-selected(string);
-    border-radius: ThemeTokens.border-radius;
+    border-radius: {radius_binding};
 
-    VerticalLayout {{
+{layout_open}
         spacing: ThemeTokens.spacing;
         padding: ThemeTokens.padding;
         Text {{
@@ -1115,9 +1412,12 @@ export component {comp_name} inherits Rectangle {{
             font-size: ThemeTokens.font-size;
             accessible-role: text;
         }}
-{element_nodes}    }}
+{element_nodes}{layout_close}
 }}
-"#
+"#,
+        radius_binding = radius_binding,
+        layout_open = layout_open,
+        layout_close = layout_close,
     )
 }
 
