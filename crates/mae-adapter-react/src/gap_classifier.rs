@@ -107,6 +107,52 @@ pub fn scan_file_gaps(file_path: &str, content: &str) -> Vec<MigrationGap> {
         let loc = format!("{}:{}", file_path, line_num);
         let trimmed = line.trim();
 
+        // Platform APIs are grouped by the native port they need so the capability report
+        // gives migration planning an actionable Clean Architecture destination.
+        let lower = trimmed.to_ascii_lowercase();
+        let specialized = if lower.contains("crypto.subtle") {
+            Some((ContractSeverity::Critical, MigrationStrategy::CustomImplementation,
+                "WebCrypto `crypto.subtle` needs a native MessageCryptoPort adapter (for example, RustCrypto-backed encryption)."))
+        } else if [
+            "rtcpeerconnection",
+            "navigator.mediadevices",
+            "audiocontext",
+            "livekit-client",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        {
+            Some((ContractSeverity::Critical, MigrationStrategy::CustomImplementation,
+                "WebRTC/WebAudio/LiveKit usage needs a native CallMediaEnginePort adapter; preserve device, call, and media-session contracts."))
+        } else if lower.contains("@capacitor/") || lower.contains("registerplugin") {
+            Some((ContractSeverity::High, MigrationStrategy::ManualAdaptation,
+                "Capacitor plugin is mobile-only; provide an explicit desktop no-op or native platform implementation behind a platform port."))
+        } else if [
+            "indexeddb",
+            "navigator.clipboard",
+            "url.createobjecturl",
+            "filereader",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+            || lower.contains("new notification(")
+            || lower.contains("notification.requestpermission")
+        {
+            Some((ContractSeverity::High, MigrationStrategy::ReplacementComponent,
+                "Browser storage/clipboard/notification/file API needs a LocalReplicaRepositoryPort or DesktopShellPort adapter."))
+        } else {
+            None
+        };
+        if let Some((severity, strategy, description)) = specialized {
+            gaps.push(MigrationGap::new(
+                &loc,
+                GapReasonCode::UiBrowserOnlyApi,
+                severity,
+                strategy,
+                description,
+            ));
+        }
+
         // 1. Browser-only APIs: window.localStorage, sessionStorage, document.cookie, navigator.geolocation, window.open
         if trimmed.contains("localStorage") {
             let mut gap = MigrationGap::new(
