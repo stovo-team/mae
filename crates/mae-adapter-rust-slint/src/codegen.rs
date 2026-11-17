@@ -356,9 +356,7 @@ fn scaffold_modular_monolith(
             write_file(
                 root,
                 &format!("{path}/src/main.rs"),
-                &format!(
-                    "{attr}slint::include_modules!();\nfn main() -> Result<(), Box<dyn std::error::Error>> {{ let path = std::env::var_os(\"MAE_CONFIG\").unwrap_or_else(|| \"appearance.toml\".into()); let settings = std::fs::read_to_string(path).ok().and_then(|source| {app_module}_config::AppearanceSettings::from_toml(&source).ok()).unwrap_or_default(); let ui = MainWindow::new()?; ui.set_brand(settings.brand.into()); ui.run()?; Ok(()) }}\n#[cfg(all(test, feature = \"headless-test\"))]\nmod tests {{\n    use super::MainWindow;\n    #[test]\n    fn constructs_window_with_headless_backend() {{\n        i_slint_backend_testing::init_no_event_loop();\n        let ui = MainWindow::new().unwrap();\n        assert!(!ui.get_brand().is_empty());\n    }}\n}}\n",
-                ),
+                &generate_modular_desktop_main_rs(&app_module, attr),
                 &mut generated,
             )?;
             write_file(
@@ -525,10 +523,37 @@ mod tests {
     )?;
     write_file(root, "appearance.toml", "# Optional runtime overrides for brand and design tokens.\nbrand = \"MAE\"\ntheme_mode = \"system\"\nbubble_radius_px = 16\ncontrol_radius_px = 12\nspacing_px = 8\nicon_size_px = 20\nfont_size_px = 14\nmotion_scale = 1\nmotion_duration_ms = 180\nprimary_color = \"#2563eb\"\nsecondary_color = \"#64748b\"\nsurface_color = \"#ffffff\"\nstrings_locale = \"en\"\napp_title_en = \"Workspace\"\napp_title_ru = \"Рабочее пространство\"\nchat_empty_en = \"No messages\"\nchat_empty_ru = \"Нет сообщений\"\n", &mut generated)?;
     write_file(root, &format!("{desktop}/ui/components/ui/popup_primitives.slint"), "import { ThemeTokens } from \"../../theme/tokens.slint\";\nexport component PopupButton inherits Rectangle {\n    in property <string> text;\n    callback clicked;\n    height: ThemeTokens.control-height;\n    border-radius: ThemeTokens.control-radius;\n    background: ThemeTokens.primary-color;\n    Text { text: root.text; color: ThemeTokens.on-primary-color; vertical-alignment: center; horizontal-alignment: center; }\n    TouchArea { clicked => { root.clicked(); } }\n}\nexport component PopupField inherits Rectangle {\n    in-out property <string> text;\n    in property <string> placeholder;\n    height: ThemeTokens.control-height;\n    border-radius: ThemeTokens.control-radius;\n    border-width: 1px;\n    border-color: ThemeTokens.border-color;\n    TextInput { text <=> root.text; }\n    if root.text == \"\" : Text { text: root.placeholder; color: ThemeTokens.text-color; }\n}\n", &mut generated)?;
+    let app_slint = format!(
+        r#"import {{ ThemeTokens }} from "theme/tokens.slint";
+import {{ PopupButton, PopupField }} from "components/ui/popup_primitives.slint";
+export component MainWindow inherits Window {{
+    in-out property <string> brand: "{title}";
+    in-out property <string> current-route: "/";
+    title: root.brand;
+    min-width: 640px;
+    min-height: 480px;
+    preferred-width: {width}px;
+    preferred-height: {height}px;
+    Rectangle {{
+        border-radius: ThemeTokens.border-radius;
+        background: ThemeTokens.surface-color;
+        VerticalLayout {{ spacing: ThemeTokens.spacing; padding: ThemeTokens.padding;
+            Text {{ text: root.brand; color: ThemeTokens.text-color; font-size: ThemeTokens.font-size; }}
+            Text {{ text: root.current-route; color: ThemeTokens.text-color; }}
+            PopupField {{ text: ""; placeholder: "Search"; }}
+            PopupButton {{ text: "Continue"; }}
+        }}
+    }}
+}}
+"#,
+        title = config.window_title,
+        width = config.window_width,
+        height = config.window_height,
+    );
     write_file(
         root,
         &format!("{desktop}/ui/app.slint"),
-        &format!("import {{ ThemeTokens }} from \"theme/tokens.slint\";\nimport {{ PopupButton, PopupField }} from \"components/ui/popup_primitives.slint\";\nexport component MainWindow inherits Window {{\n    in-out property <string> brand: \"{}\";\n    title: root.brand;\n    min-width: 640px;\n    min-height: 480px;\n    preferred-width: {}px;\n    preferred-height: {}px;\n    Rectangle {{\n        border-radius: ThemeTokens.border-radius;\n        background: ThemeTokens.surface-color;\n        VerticalLayout {{ spacing: ThemeTokens.spacing; padding: ThemeTokens.padding;\n            Text {{ text: root.brand; color: ThemeTokens.text-color; font-size: ThemeTokens.font-size; }}\n            PopupField {{ text: \"\"; placeholder: \"Search\"; }}\n            PopupButton {{ text: \"Continue\"; }}\n        }}\n    }}\n}}\n", config.window_title, config.window_width, config.window_height),
+        &app_slint,
         &mut generated,
     )?;
     write_file(root, "scripts/check-solid-boundaries.sh", "#!/usr/bin/env bash\nset -euo pipefail\n! rg -n 'slint|std::fs|std::net' crates/*-domain/src\n", &mut generated)?;
@@ -654,6 +679,73 @@ fn main() {
 }
 "#
     .to_string()
+}
+
+fn generate_modular_desktop_main_rs(app_module: &str, attr: &str) -> String {
+    r#"__WINDOW_ATTRIBUTE__slint::include_modules!();
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::var_os("MAE_CONFIG").unwrap_or_else(|| "appearance.toml".into());
+    let settings = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|source| __APP_MODULE___config::AppearanceSettings::from_toml(&source).ok())
+        .unwrap_or_default();
+
+    if let Ok(route) = std::env::var("MAE_VISUAL_ROUTE") {
+        #[cfg(feature = "headless-test")]
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
+        )))
+        .map_err(|error| format!("cannot initialize headless Slint renderer: {error}"))?;
+        #[cfg(not(feature = "headless-test"))]
+        return Err("native screenshot capture requires the headless-test feature".into());
+
+        let ui = MainWindow::new()?;
+        ui.set_brand(settings.brand.into());
+        ui.set_current_route(route.into());
+        ui.window()
+            .show()
+            .map_err(|error| format!("cannot show headless Slint window: {error}"))?;
+        let snapshot = ui
+            .window()
+            .take_snapshot()
+            .map_err(|error| format!("cannot render native Slint snapshot: {error}"))?;
+        let output = std::env::var_os("MAE_VISUAL_OUTPUT")
+            .ok_or("MAE_VISUAL_OUTPUT must name the native screenshot file")?;
+        let mut ppm = format!("P6\n{} {}\n255\n", snapshot.width(), snapshot.height()).into_bytes();
+        ppm.extend(snapshot.as_bytes().chunks_exact(4).flat_map(|pixel| pixel[..3].iter().copied()));
+        std::fs::write(&output, ppm).map_err(|error| {
+            format!(
+                "cannot write native Slint screenshot {}: {error}",
+                std::path::Path::new(&output).display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    let ui = MainWindow::new()?;
+    ui.set_brand(settings.brand.into());
+    ui.run()?;
+    Ok(())
+}
+
+#[cfg(all(test, feature = "headless-test"))]
+mod tests {
+    use super::MainWindow;
+
+    #[test]
+    fn constructs_window_with_headless_backend() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = MainWindow::new().unwrap();
+        assert!(!ui.get_brand().is_empty());
+    }
+}
+"#
+    .replace("__WINDOW_ATTRIBUTE__", attr)
+    .replace("__APP_MODULE__", app_module)
 }
 
 fn generate_main_rs(
